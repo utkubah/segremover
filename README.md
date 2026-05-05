@@ -72,12 +72,17 @@ yt-dlp       embedding  alignment +   3 heads       on dev     + 500-doc
 
 | File | Status |
 |---|---|
-| `src/scrape.py` | ✅ Done — yt-dlp, checkpoint resume, cookie support |
+| `src/scrape.py` | ✅ Done — yt-dlp, 6 genres, sharding, checkpoint resume |
 | `src/segment.py` | ✅ Done — spaCy sentences + sentence-embedding topic boundaries |
-| `notebooks/eda.ipynb` | ✅ Done — §1–11, corpus features + weak label analysis, saves `corpus_summary.csv` |
-| `sources.csv` | ✅ Done — all 3 genres |
-| `src/weak_labels.py` | ✅ Done — 6 local LFs → Snorkel LabelModel → `weak_labels.jsonl` |
-| `src/summary_align.py` | ✅ Done — optional 7th LF (local BART, ~1.6 GB download) |
+| `notebooks/eda.ipynb` | ✅ Done — §1–11, corpus features + weak label analysis |
+| `data/source_registry.csv` | ✅ Done — 6 genres, 50+ sources, 5 000 target |
+| `src/weak_labels.py` | ✅ Done — 7 LFs → Snorkel LabelModel → `weak_labels.jsonl` (Head A) |
+| `src/summary_align.py` | ✅ Done — 7th LF using local BART summarization |
+| `src/function_labels.py` | ✅ Done — 13 rule LFs + optional LLM → `function_labels.jsonl` (Head B) |
+| `src/disfluency_labels.py` | ✅ Done — 7 rule LFs + optional LLM → `disfluency_labels.jsonl` (Head C) |
+| `slurm/run_scrape.sh` | ✅ Done — array job, 4 shards |
+| `slurm/run_labels.sh` | ✅ Done — full label pipeline (segment → all 3 heads) |
+| `slurm/run_train.sh` | ✅ Done — placeholder wired to `src/train.py` |
 | `src/train.py` | ⬜ Next |
 | `src/baselines.py` | ⬜ Next |
 | `src/eval_segment.py`, `src/eval_transcript.py` | ⬜ Last |
@@ -103,8 +108,23 @@ python src/weak_labels.py
 python src/summary_align.py
 python src/weak_labels.py   # re-run to fold in the 7th LF
 
-# 5. Explore results
+# 5. Function labels (Head B — 13 rule LFs, no LLM needed)
+python src/function_labels.py
+# With open-source LLM for 14th LF (downloads model on first run):
+# python src/function_labels.py --llm-model microsoft/Phi-3.5-mini-instruct
+
+# 6. Disfluency labels (Head C — 7 rule LFs)
+python src/disfluency_labels.py
+
+# 7. Explore results
 jupyter notebook notebooks/eda.ipynb
+
+# ── On HPC with Slurm ──────────────────────────────────────────────
+# Scrape across 4 parallel nodes:
+# sbatch slurm/run_scrape.sh
+
+# Run full label pipeline (segment → all 3 heads) with LLM:
+# sbatch slurm/run_labels.sh microsoft/Phi-3.5-mini-instruct
 ```
 
 ---
