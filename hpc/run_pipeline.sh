@@ -7,7 +7,7 @@
 #   bash hpc/run_pipeline.sh microsoft/Phi-3.5-mini-instruct  # + LLM LF
 #
 # Job chain:
-#   [scrape array] → segment → labels → train
+#   [scrape array] → segment → labels → baselines → train → eval
 #
 # Run from the repo root:
 #   cd ~/segremover && bash hpc/run_pipeline.sh
@@ -42,13 +42,26 @@ else
 fi
 echo "  labels job: $LABEL_JOB  (LLM: ${LLM_MODEL:-none})"
 
-# --- Stage 4: Train (depends on labels) ---
+# --- Stage 4: Baselines (depends on labels — needs weak_labels.jsonl) ---
+BASELINE_JOB=$(sbatch --parsable \
+    --dependency=afterok:"${LABEL_JOB}" \
+    hpc/run_baselines.sh)
+echo "  baselines job: $BASELINE_JOB"
+
+# --- Stage 5: Train (depends on labels) ---
 TRAIN_JOB=$(sbatch --parsable \
     --dependency=afterok:"${LABEL_JOB}" \
     hpc/run_train.sh)
 echo "  train job: $TRAIN_JOB"
 
+# --- Stage 6: Eval (depends on both baselines AND train) ---
+EVAL_JOB=$(sbatch --parsable \
+    --dependency=afterok:"${BASELINE_JOB}:${TRAIN_JOB}" \
+    hpc/run_eval.sh)
+echo "  eval job: $EVAL_JOB"
+
 echo ""
 echo "Pipeline submitted. Monitor with:"
 echo "  squeue -u $USER"
 echo "  tail -f logs/train_${TRAIN_JOB}.out"
+echo "  tail -f logs/eval_${EVAL_JOB}.out"

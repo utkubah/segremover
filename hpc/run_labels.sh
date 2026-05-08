@@ -13,8 +13,9 @@
 #   sbatch hpc/run_labels.sh
 #
 # Usage (with open-source LLM for extra LF coverage):
-#   sbatch hpc/run_labels.sh microsoft/Phi-3.5-mini-instruct
-#   sbatch hpc/run_labels.sh mistralai/Mistral-7B-Instruct-v0.3
+#   sbatch hpc/run_labels.sh Qwen/Qwen2.5-3B-Instruct
+#   sbatch hpc/run_labels.sh Qwen/Qwen2.5-1.5B-Instruct
+#   sbatch hpc/run_labels.sh Qwen/Qwen2.5-0.5B-Instruct
 #
 # Correct run order (weak_labels must come last so it sees all auxiliary files):
 #   1. summary_align       → summary_align_votes.jsonl
