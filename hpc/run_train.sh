@@ -2,10 +2,12 @@
 #SBATCH --job-name=segremover-train
 #SBATCH --output=logs/train_%j.out
 #SBATCH --error=logs/train_%j.err
+#SBATCH --partition=stud
+#SBATCH --qos=stud
 #SBATCH --time=12:00:00
 #SBATCH --mem=48G
 #SBATCH --cpus-per-task=8
-#SBATCH --gres=gpu:1           # single A100/V100 sufficient for roberta-base
+#SBATCH --gres=gpu:1
 
 # Usage:
 #   sbatch hpc/run_train.sh
@@ -16,10 +18,15 @@
 
 set -euo pipefail
 
-REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+REPO_DIR="${SLURM_SUBMIT_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 cd "$REPO_DIR"
 
 mkdir -p logs models
+
+export HF_HOME=/mnt/beegfsstudents/home/3223837/hf_cache
+export SENTENCE_TRANSFORMERS_HOME=/mnt/beegfsstudents/home/3223837/hf_cache/sentence_transformers
+export TRANSFORMERS_OFFLINE=1
+export HF_DATASETS_OFFLINE=1
 
 source "$(conda info --base)/etc/profile.d/conda.sh"
 conda activate segremover

@@ -252,8 +252,10 @@ def main() -> None:
     nlp = spacy.load("en_core_web_sm", disable=["ner", "tagger", "lemmatizer", "attribute_ruler"])
     nlp.add_pipe("sentencizer") if "sentencizer" not in nlp.pipe_names else None
 
+    device = "cuda" if __import__("torch").cuda.is_available() else "cpu"
+    print(f"Device: {device}")
     print(f"Loading sentence-embedding model ({EMBED_MODEL}) ...")
-    embedder = SentenceTransformer(EMBED_MODEL)
+    embedder = SentenceTransformer(EMBED_MODEL, device=device)
 
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     n_sent = 0

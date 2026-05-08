@@ -259,6 +259,9 @@ def main() -> None:
     total_segs = sum(len(docs[v]) for v in video_ids)
     print(f"Processing {len(video_ids)} documents ({total_segs:,} segments) ...")
 
+    device = "cuda" if __import__("torch").cuda.is_available() else "cpu"
+    print(f"Device: {device}")
+
     # Optional LLM
     llm_fn = None
     lf_names = LF_RULE_NAMES.copy()

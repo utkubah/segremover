@@ -363,8 +363,10 @@ def main() -> None:
     print("Loading spaCy (en_core_web_sm) ...")
     nlp = spacy.load("en_core_web_sm", disable=["tagger", "lemmatizer", "attribute_ruler"])
 
+    device = "cuda" if __import__("torch").cuda.is_available() else "cpu"
+    print(f"Device: {device}")
     print(f"Loading sentence embedder ({EMBED_MODEL}) ...")
-    embedder = SentenceTransformer(EMBED_MODEL)
+    embedder = SentenceTransformer(EMBED_MODEL, device=device)
 
     # Optional LLM
     llm_fn = None

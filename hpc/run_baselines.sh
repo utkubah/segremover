@@ -1,20 +1,16 @@
 #!/bin/bash
-#SBATCH --job-name=segremover-segment
-#SBATCH --output=logs/segment_%j.out
-#SBATCH --error=logs/segment_%j.err
+#SBATCH --job-name=segremover-baselines
+#SBATCH --output=logs/baselines_%j.out
+#SBATCH --error=logs/baselines_%j.err
 #SBATCH --partition=stud
 #SBATCH --qos=stud
-#SBATCH --time=08:00:00
+#SBATCH --time=04:00:00
 #SBATCH --mem=32G
 #SBATCH --cpus-per-task=4
 #SBATCH --gres=gpu:1
 
 # Usage:
-#   sbatch hpc/run_segment.sh
-#
-# Reads  data/raw/**/*.json
-# Writes data/processed/segments_topic.jsonl
-#        data/processed/segments_sent.jsonl
+#   sbatch hpc/run_baselines.sh
 
 set -euo pipefail
 
@@ -31,8 +27,8 @@ export HF_DATASETS_OFFLINE=1
 source "$(conda info --base)/etc/profile.d/conda.sh"
 conda activate segremover
 
-echo "=== Segmenting transcripts ==="
-python src/segment.py
+echo "=== Baselines ==="
+python src/baselines.py
 
 echo "=== Done ==="
-wc -l data/processed/segments_topic.jsonl
+ls -lh data/processed/baselines.jsonl

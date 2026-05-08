@@ -72,9 +72,9 @@ GENRE_TARGETS_DEFAULT = {
     "lectures": 1200,
     "commentary": 900,
     "ted": 700,
-    "tv_series": 400,
+    "tv_series": 480,
     "podcasts": 900,
-    "entertainment": 900,
+    "entertainment": 820,
 }
 
 ALLOWED_GENRES = set(GENRE_TARGETS_DEFAULT)

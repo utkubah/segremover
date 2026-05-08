@@ -79,7 +79,7 @@ def generate_summary(text: str, tokenizer, model) -> str:
     for chunk in chunks:
         # BART input limit is ~1024 tokens; trim chunk to be safe
         trimmed = " ".join(chunk.split()[:700])
-        inputs = tokenizer(trimmed, return_tensors="pt", max_length=1024, truncation=True)
+        inputs = tokenizer(trimmed, return_tensors="pt", max_length=1024, truncation=True).to(model.device)
         with torch.no_grad():
             output_ids = model.generate(
                 **inputs,
@@ -148,21 +148,37 @@ def main() -> None:
     video_ids = list(docs.keys())
     if args.max_docs:
         video_ids = video_ids[:args.max_docs]
+    # ── Resume: skip already-processed video_ids ───────────────────────────────
+    done: set[str] = set()
+    if OUT_PATH.exists():
+        with OUT_PATH.open(encoding="utf-8") as f:
+            for line in f:
+                try:
+                    done.add(json.loads(line)["video_id"])
+                except Exception:
+                    pass
+        if done:
+            print(f"Resuming: {len(done)} videos already done, skipping them.")
+            video_ids = [v for v in video_ids if v not in done]
+
     print(f"Processing {len(video_ids)} documents ...")
+
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    print(f"Device: {device}")
 
     print(f"Loading summarizer ({SUMMARIZER_MODEL}) — first run downloads ~1.6 GB ...")
     tokenizer = AutoTokenizer.from_pretrained(SUMMARIZER_MODEL)
-    model = AutoModelForSeq2SeqLM.from_pretrained(SUMMARIZER_MODEL)
+    model = AutoModelForSeq2SeqLM.from_pretrained(SUMMARIZER_MODEL).to(device)
     model.eval()
 
     print(f"Loading sentence-embedding model ({EMBED_MODEL}) ...")
-    embedder = SentenceTransformer(EMBED_MODEL)
+    embedder = SentenceTransformer(EMBED_MODEL, device=device)
 
     OUT_PATH.parent.mkdir(parents=True, exist_ok=True)
 
     total_remove = total_keep = total_abstain = 0
 
-    with OUT_PATH.open("w", encoding="utf-8") as out_f:
+    with OUT_PATH.open("a", encoding="utf-8") as out_f:
         for vid in tqdm(video_ids, desc="summarizing"):
             segs = sorted(docs[vid], key=lambda s: s["seg_idx"])
             texts = [s["text"] for s in segs]
@@ -189,9 +205,12 @@ def main() -> None:
             total_abstain += votes.count(ABSTAIN)
 
     total = total_remove + total_keep + total_abstain
-    print(f"\nWrote {total:,} votes to {OUT_PATH}")
-    print(f"  remove={total_remove:,}  keep={total_keep:,}  abstain={total_abstain:,}")
-    print(f"  coverage = {100*(total-total_abstain)/total:.1f}%")
+    print(f"\nWrote {total:,} new votes to {OUT_PATH}")
+    if total == 0:
+        print("  (nothing to do — all documents already processed)")
+    else:
+        print(f"  remove={total_remove:,}  keep={total_keep:,}  abstain={total_abstain:,}")
+        print(f"  coverage = {100*(total-total_abstain)/total:.1f}%")
     print("\nNow re-run: python src/weak_labels.py")
 
 

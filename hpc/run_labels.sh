@@ -2,10 +2,12 @@
 #SBATCH --job-name=segremover-labels
 #SBATCH --output=logs/labels_%j.out
 #SBATCH --error=logs/labels_%j.err
-#SBATCH --time=08:00:00
+#SBATCH --partition=stud
+#SBATCH --qos=stud
+#SBATCH --time=24:00:00
 #SBATCH --mem=48G
 #SBATCH --cpus-per-task=4
-#SBATCH --gres=gpu:1           # required only when --llm-model is passed; remove otherwise
+#SBATCH --gres=gpu:1
 
 # Usage (rule LFs only, no GPU needed — remove --gres line above):
 #   sbatch hpc/run_labels.sh
@@ -24,10 +26,15 @@
 
 set -euo pipefail
 
-REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+REPO_DIR="${SLURM_SUBMIT_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 cd "$REPO_DIR"
 
 mkdir -p logs data/processed
+
+export HF_HOME=/mnt/beegfsstudents/home/3223837/hf_cache
+export SENTENCE_TRANSFORMERS_HOME=/mnt/beegfsstudents/home/3223837/hf_cache/sentence_transformers
+export TRANSFORMERS_OFFLINE=1
+export HF_DATASETS_OFFLINE=1
 
 source "$(conda info --base)/etc/profile.d/conda.sh"
 conda activate segremover
