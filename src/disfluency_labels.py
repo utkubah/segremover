@@ -185,11 +185,14 @@ def lf_llm_disfluency_batch(texts: list[str], tokenizer, model, device: str) -> 
         segments="\n".join(f'{i+1}. "{t[:300]}"' for i, t in enumerate(texts))
     )
     try:
-        input_ids = tokenizer.apply_chat_template(
+        enc = tokenizer.apply_chat_template(
             [{"role": "user", "content": prompt}],
             add_generation_prompt=True,
             return_tensors="pt",
-        ).to(device)
+        )
+        # apply_chat_template returns a plain tensor (old transformers) or
+        # a BatchEncoding (new transformers); extract input_ids in either case.
+        input_ids = (enc["input_ids"] if hasattr(enc, "keys") else enc).to(device)
     except Exception:
         input_ids = tokenizer(prompt, return_tensors="pt").input_ids.to(device)
 
@@ -256,6 +259,10 @@ def main() -> None:
     video_ids = list(docs.keys())
     if args.max_docs:
         video_ids = video_ids[:args.max_docs]
+
+    out_path = (OUT_PATH.parent / (OUT_PATH.stem + "_smoke" + OUT_PATH.suffix)
+                if args.max_docs else OUT_PATH)
+
     total_segs = sum(len(docs[v]) for v in video_ids)
     print(f"Processing {len(video_ids)} documents ({total_segs:,} segments) ...")
 
@@ -288,6 +295,39 @@ def main() -> None:
         lf_names.append("LF_llm_disfluency")
         print(f"LLM loaded on {device}")
 
+    # ── Resume: reload existing votes so we only process new/missing docs ────────
+    existing_segs: list[dict] = []
+    existing_lf_votes: list[list[int]] = []
+    done_vids: set[str] = set()
+
+    if out_path.exists():
+        raw_rows: dict[tuple, dict] = {}
+        with out_path.open(encoding="utf-8") as f:
+            for line in f:
+                try:
+                    row = json.loads(line)
+                    raw_rows[(row["video_id"], row["seg_idx"])] = row
+                except Exception:
+                    pass
+        for v in video_ids:
+            segs_v = docs[v]
+            if not all((v, s["seg_idx"]) in raw_rows for s in segs_v):
+                continue  # partially written — reprocess
+            row0 = raw_rows[(v, segs_v[0]["seg_idx"])]
+            if set(row0.get("votes", {}).keys()) != set(lf_names):
+                continue  # LF schema changed — reprocess
+            done_vids.add(v)
+            for s in segs_v:
+                row = raw_rows[(v, s["seg_idx"])]
+                existing_segs.append(row)
+                existing_lf_votes.append([row["votes"][n] for n in lf_names])
+
+    if done_vids:
+        n_new = len(video_ids) - len(done_vids)
+        print(f"Resuming: {len(done_vids)} videos done ({len(existing_segs):,} segs). "
+              f"Processing {n_new} new docs ...")
+        video_ids = [v for v in video_ids if v not in done_vids]
+
     all_segs: list[dict] = []
     all_votes: list[list[int]] = []
 
@@ -311,6 +351,10 @@ def main() -> None:
             all_segs.append(seg)
             all_votes.append(votes)
 
+    # Merge existing (already-labeled) + new segments before Snorkel refit
+    all_segs  = existing_segs  + all_segs
+    all_votes = existing_lf_votes + all_votes
+
     L = np.array(all_votes, dtype=int)
 
     print("\nLF coverage report:")
@@ -325,8 +369,8 @@ def main() -> None:
     probs = aggregate(L)
     labels = probs.argmax(axis=1)
 
-    OUT_PATH.parent.mkdir(parents=True, exist_ok=True)
-    with OUT_PATH.open("w", encoding="utf-8") as f:
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    with out_path.open("w", encoding="utf-8") as f:
         for seg, votes, prob_vec, label in zip(all_segs, all_votes, probs, labels):
             f.write(json.dumps({
                 "video_id": seg["video_id"],
@@ -338,7 +382,7 @@ def main() -> None:
                 "votes": dict(zip(lf_names, [int(v) for v in votes])),
             }, ensure_ascii=False) + "\n")
 
-    print(f"\nWrote {len(all_segs):,} disfluency labels to {OUT_PATH}")
+    print(f"\nWrote {len(all_segs):,} disfluency labels to {out_path}")
     print("Label distribution:")
     for c, name in enumerate(DISFL_NAMES):
         n = int((labels == c).sum())

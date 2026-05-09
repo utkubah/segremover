@@ -84,22 +84,15 @@ def load_data(max_docs=None):
 # ── Baseline 1: random ────────────────────────────────────────────────────────
 
 def baseline_random(docs, weak, seed=42):
-    """Biased coin: P(remove) = corpus positive rate (fraction of p_remove > 0.5)."""
+    """Biased coin: P(remove) drawn from Uniform[0,1], threshold at pos_rate for AUC."""
     rng = random.Random(seed)
     all_p = list(weak.values())
-    pos_rate = sum(1 for p in all_p if p > 0.5) / len(all_p)
+    pos_rate = sum(1 for p in all_p if p > 0.5) / len(all_p)  # noqa: F841 (kept for reference)
 
     scores: dict[tuple, float] = {}
     for vid, doc in docs.items():
         for seg in doc["segments"]:
-            scores[(vid, seg["seg_idx"])] = rng.random() * pos_rate + (1 - pos_rate) * rng.random()
-    # Re-scale so mean ≈ pos_rate (simple: just use uniform [0,1] but bias the threshold)
-    # Simpler correct form: draw from Bernoulli(pos_rate) then jitter
-    rng2 = random.Random(seed + 1)
-    scores = {}
-    for vid, doc in docs.items():
-        for seg in doc["segments"]:
-            scores[(vid, seg["seg_idx"])] = float(rng2.random() < pos_rate)
+            scores[(vid, seg["seg_idx"])] = rng.random()
     return scores
 
 
@@ -269,8 +262,10 @@ def main():
         evaluate_auc(name, sc, weak, docs)
 
     # ── Write output ──────────────────────────────────────────────────────────
-    OUT_PATH.parent.mkdir(parents=True, exist_ok=True)
-    with OUT_PATH.open("w", encoding="utf-8") as f:
+    out_path = (OUT_PATH.parent / (OUT_PATH.stem + "_smoke" + OUT_PATH.suffix)
+                if args.max_docs else OUT_PATH)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    with out_path.open("w", encoding="utf-8") as f:
         for vid, doc in docs.items():
             for seg in doc["segments"]:
                 key = (vid, seg["seg_idx"])
@@ -284,7 +279,7 @@ def main():
                     "sbert":    sbert_scores.get(key),
                 }, ensure_ascii=False) + "\n")
 
-    print(f"\nWrote {n_segs:,} rows to {OUT_PATH}")
+    print(f"\nWrote {n_segs:,} rows to {out_path}")
 
 
 if __name__ == "__main__":

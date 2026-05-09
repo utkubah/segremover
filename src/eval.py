@@ -167,7 +167,7 @@ def load_all_data(data_dir: Path, max_docs: int | None = None) -> dict:
     summary_path = data_dir / "corpus_summary.csv"
     summary = pd.read_csv(summary_path) if summary_path.exists() else None
 
-    genre: dict[str, str]  = {v: docs[v][0]["genre"] for v in video_ids}
+    genre: dict[str, str]  = {v: docs[v][0]["genre"] for v in video_ids if docs[v]}
     length_bucket: dict[str, str] = {}
     if summary is not None and "length_bucket" in summary.columns:
         for _, row in summary.iterrows():

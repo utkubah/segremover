@@ -11,6 +11,7 @@
 
 # Usage:
 #   sbatch hpc/run_baselines.sh
+#   sbatch hpc/run_baselines.sh --max-docs 100   # smoke test
 
 set -euo pipefail
 
@@ -28,7 +29,7 @@ source "$(conda info --base)/etc/profile.d/conda.sh"
 conda activate segremover
 
 echo "=== Baselines ==="
-python src/baselines.py
+python src/baselines.py "$@"
 
 echo "=== Done ==="
 ls -lh data/processed/baselines.jsonl

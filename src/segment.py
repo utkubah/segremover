@@ -260,21 +260,33 @@ def main() -> None:
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     n_sent = 0
     n_topic = 0
+    n_skipped = 0
 
     with SENT_PATH.open("w", encoding="utf-8") as sf, TOPIC_PATH.open("w", encoding="utf-8") as tf:
         for doc in tqdm(docs, desc="segmenting"):
             sentences = split_sentences(doc["transcript"], nlp)
-            if len(sentences) < MIN_SENTS_PER_TOPIC:
+            if not sentences:
+                # Truly empty transcript — nothing to write
+                n_skipped += 1
+                tqdm.write(f"  skip {doc['video_id']} ({doc['genre']}): empty transcript")
                 continue
-            topic_segs = topic_segment(sentences, embedder)
+            if len(sentences) < MIN_SENTS_PER_TOPIC:
+                # Too short for topic boundary detection → keep as one segment
+                tqdm.write(f"  short {doc['video_id']} ({doc['genre']}): "
+                           f"{len(sentences)} sent → single topic segment")
+                topic_segs = [list(range(len(sentences)))]
+            else:
+                topic_segs = topic_segment(sentences, embedder)
             write_segments(doc, sentences, topic_segs, sf, tf)
             n_sent += len(sentences)
             n_topic += len(topic_segs)
 
+    n_written = len(docs) - n_skipped
     print(f"\nWrote {n_sent:,} sentence segments to {SENT_PATH}")
     print(f"Wrote {n_topic:,} topic  segments to {TOPIC_PATH}")
-    print(f"Avg sentences per doc: {n_sent / len(docs):.1f}")
-    print(f"Avg topics    per doc: {n_topic / len(docs):.1f}")
+    print(f"Documents written : {n_written:,} / {len(docs):,}  (skipped {n_skipped} with <{MIN_SENTS_PER_TOPIC} sentences)")
+    print(f"Avg sentences per doc: {n_sent / max(n_written, 1):.1f}")
+    print(f"Avg topics    per doc: {n_topic / max(n_written, 1):.1f}")
 
 
 if __name__ == "__main__":

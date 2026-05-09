@@ -79,10 +79,11 @@ def generate_summary(text: str, tokenizer, model) -> str:
     for chunk in chunks:
         # BART input limit is ~1024 tokens; trim chunk to be safe
         trimmed = " ".join(chunk.split()[:700])
-        inputs = tokenizer(trimmed, return_tensors="pt", max_length=1024, truncation=True).to(model.device)
+        enc = tokenizer(trimmed, return_tensors="pt", max_length=1024, truncation=True).to(model.device)
         with torch.no_grad():
             output_ids = model.generate(
-                **inputs,
+                enc["input_ids"],
+                attention_mask=enc["attention_mask"],
                 max_length=SUMMARY_MAX_TOKENS,
                 min_length=SUMMARY_MIN_TOKENS,
                 num_beams=4,
@@ -148,18 +149,29 @@ def main() -> None:
     video_ids = list(docs.keys())
     if args.max_docs:
         video_ids = video_ids[:args.max_docs]
-    # ── Resume: skip already-processed video_ids ───────────────────────────────
-    done: set[str] = set()
-    if OUT_PATH.exists():
-        with OUT_PATH.open(encoding="utf-8") as f:
+
+    out_path = (OUT_PATH.parent / (OUT_PATH.stem + "_smoke" + OUT_PATH.suffix)
+                if args.max_docs else OUT_PATH)
+
+    # ── Resume: skip videos where ALL segments are already written ────────────
+    # Track at (video_id, seg_idx) level so a mid-video crash doesn't silently
+    # drop the remaining segments on the next run.
+    done_segs: set[tuple] = set()
+    if out_path.exists():
+        with out_path.open(encoding="utf-8") as f:
             for line in f:
                 try:
-                    done.add(json.loads(line)["video_id"])
+                    row = json.loads(line)
+                    done_segs.add((row["video_id"], row["seg_idx"]))
                 except Exception:
                     pass
-        if done:
-            print(f"Resuming: {len(done)} videos already done, skipping them.")
-            video_ids = [v for v in video_ids if v not in done]
+    fully_done = {
+        v for v in video_ids
+        if all((v, seg["seg_idx"]) in done_segs for seg in docs[v])
+    }
+    if fully_done:
+        print(f"Resuming: {len(fully_done)} videos fully written, skipping them.")
+        video_ids = [v for v in video_ids if v not in fully_done]
 
     print(f"Processing {len(video_ids)} documents ...")
 
@@ -174,11 +186,11 @@ def main() -> None:
     print(f"Loading sentence-embedding model ({EMBED_MODEL}) ...")
     embedder = SentenceTransformer(EMBED_MODEL, device=device)
 
-    OUT_PATH.parent.mkdir(parents=True, exist_ok=True)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
 
     total_remove = total_keep = total_abstain = 0
 
-    with OUT_PATH.open("a", encoding="utf-8") as out_f:
+    with out_path.open("a", encoding="utf-8") as out_f:
         for vid in tqdm(video_ids, desc="summarizing"):
             segs = sorted(docs[vid], key=lambda s: s["seg_idx"])
             texts = [s["text"] for s in segs]
@@ -205,7 +217,7 @@ def main() -> None:
             total_abstain += votes.count(ABSTAIN)
 
     total = total_remove + total_keep + total_abstain
-    print(f"\nWrote {total:,} new votes to {OUT_PATH}")
+    print(f"\nWrote {total:,} new votes to {out_path}")
     if total == 0:
         print("  (nothing to do — all documents already processed)")
     else:

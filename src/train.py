@@ -119,6 +119,10 @@ def train_dev_split(docs, dev_frac=0.2):
 
     train_docs, dev_docs = [], []
     for lst in by_genre.values():
+        if len(lst) < 2:
+            # Only one doc for this genre — put it in training, skip dev
+            train_docs.extend(lst)
+            continue
         n_dev = max(1, int(len(lst) * dev_frac))
         dev_docs.extend(lst[:n_dev])
         train_docs.extend(lst[n_dev:])
@@ -387,7 +391,8 @@ def main():
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Device: {device}")
-    MODELS_DIR.mkdir(exist_ok=True)
+    models_dir = MODELS_DIR / "smoke" if args.max_docs else MODELS_DIR
+    models_dir.mkdir(parents=True, exist_ok=True)
 
     # ── Data ──────────────────────────────────────────────────────────────────
     print("Loading data...")
@@ -434,7 +439,7 @@ def main():
     print(f"Warmup: {warmup} steps  |  Loss weights: A=1.0  B={args.w_b}  C={args.w_c}\n")
 
     best_auc  = 0.0
-    best_path = MODELS_DIR / "best.pt"
+    best_path = models_dir / "best.pt"
 
     # ── Training loop ─────────────────────────────────────────────────────────
     for epoch in range(1, args.epochs + 1):
@@ -474,12 +479,13 @@ def main():
         train_loss = total_l / max(n_batches, 1)
         auc = dev_auc(model, dev_loader, device, args.seg_batch)
 
+        nb = max(n_batches, 1)
         print(
             f"Epoch {epoch}  "
             f"train_loss={train_loss:.4f} "
-            f"(A={total_la/n_batches:.4f} "
-            f"B={total_lb/n_batches:.4f} "
-            f"C={total_lc/n_batches:.4f})  "
+            f"(A={total_la/nb:.4f} "
+            f"B={total_lb/nb:.4f} "
+            f"C={total_lc/nb:.4f})  "
             f"dev_auc={auc:.4f}"
         )
 
@@ -490,6 +496,9 @@ def main():
 
     # ── Temperature calibration + ECE ─────────────────────────────────────────
     print("\nCalibrating temperature on dev set ...")
+    if not best_path.exists():
+        print(f"  No checkpoint saved (best_auc never improved from 0.0) — skipping calibration")
+        return
     model.load_state_dict(torch.load(best_path, map_location=device, weights_only=True))
     T = fit_temperature(model, dev_loader, device, args.seg_batch)
     print(f"  Temperature T = {T:.2f}")
@@ -522,8 +531,8 @@ def main():
         "best_dev_auc": round(best_auc, 4),
         "dev_ece":      round(ece_val, 4),
     }
-    (MODELS_DIR / "config.json").write_text(json.dumps(config, indent=2))
-    print(f"\nSaved {best_path} and {MODELS_DIR / 'config.json'}")
+    (models_dir / "config.json").write_text(json.dumps(config, indent=2))
+    print(f"\nSaved {best_path} and {models_dir / 'config.json'}")
     print(f"Best dev AUC: {best_auc:.4f}  |  Temperature: {T:.2f}  |  ECE: {ece_val:.4f}")
 
 
