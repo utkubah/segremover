@@ -435,7 +435,7 @@ def main():
 
     eff_batch = args.batch_size * args.grad_accum
     print(f"\nTraining: {args.epochs} epochs, {n_steps} optimizer steps")
-    print(f"Batch: {args.batch_size} docs × {args.grad_accum} accum = {eff_batch} effective")
+    print(f"Batch: {args.batch_size} docs x {args.grad_accum} accum = {eff_batch} effective")
     print(f"Warmup: {warmup} steps  |  Loss weights: A=1.0  B={args.w_b}  C={args.w_c}\n")
 
     best_auc  = 0.0
@@ -492,7 +492,7 @@ def main():
         if auc > best_auc:
             best_auc = auc
             torch.save(model.state_dict(), best_path)
-            print(f"  ✓ Checkpoint saved (AUC={best_auc:.4f})")
+            print(f"  [saved] Checkpoint (AUC={best_auc:.4f})")
 
     # ── Temperature calibration + ECE ─────────────────────────────────────────
     print("\nCalibrating temperature on dev set ...")

@@ -17,6 +17,7 @@ datasets>=2.14.0
 snorkel>=0.9.9
 
 # Analysis & baselines
+rouge-score>=0.1.2
 scikit-learn>=1.4.0
 pandas>=2.0.0
 numpy>=1.26.0

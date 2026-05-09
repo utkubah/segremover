@@ -273,7 +273,7 @@ def main() -> None:
             if len(sentences) < MIN_SENTS_PER_TOPIC:
                 # Too short for topic boundary detection → keep as one segment
                 tqdm.write(f"  short {doc['video_id']} ({doc['genre']}): "
-                           f"{len(sentences)} sent → single topic segment")
+                           f"{len(sentences)} sent -> single topic segment")
                 topic_segs = [list(range(len(sentences)))]
             else:
                 topic_segs = topic_segment(sentences, embedder)
