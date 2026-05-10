@@ -214,9 +214,14 @@ class SegRemover(nn.Module):
     """
 
     def __init__(self, encoder_name: str = "roberta-base",
-                 n_inter_layers: int = 2, dropout: float = 0.1):
+                 n_inter_layers: int = 2, dropout: float = 0.1,
+                 grad_checkpoint: bool = False):
         super().__init__()
         self.encoder = RobertaModel.from_pretrained(encoder_name)
+        if grad_checkpoint:
+            # Recompute activations on backward instead of storing them.
+            # Cuts Stage-1 activation memory by ~10× at the cost of ~25% slower backward.
+            self.encoder.gradient_checkpointing_enable()
         d = self.encoder.config.hidden_size  # 768 (base) or 1024 (large)
 
         self.pos_emb = nn.Embedding(MAX_POS, d)
@@ -362,16 +367,21 @@ def main():
     parser = argparse.ArgumentParser(description="Train segremover 3-head model")
     parser.add_argument("--encoder",      default="roberta-base",
                         help="HuggingFace encoder (roberta-base or roberta-large)")
-    parser.add_argument("--epochs",       type=int,   default=3)
-    parser.add_argument("--batch-size",   type=int,   default=4,   dest="batch_size",
+    parser.add_argument("--epochs",       type=int,   default=5)
+    parser.add_argument("--batch-size",   type=int,   default=2,   dest="batch_size",
                         help="Documents per gradient step")
     parser.add_argument("--seg-batch",    type=int,   default=32,  dest="seg_batch",
                         help="Segments per roberta forward pass (memory control)")
     parser.add_argument("--lr",           type=float, default=2e-5)
     parser.add_argument("--inter-layers", type=int,   default=2,   dest="inter_layers")
-    parser.add_argument("--max-segs",     type=int,   default=256, dest="max_segs",
+    parser.add_argument("--max-segs",     type=int,   default=128, dest="max_segs",
                         help="Max segments per document (truncates longer docs)")
-    parser.add_argument("--max-tok",      type=int,   default=512, dest="max_tok")
+    parser.add_argument("--max-tok",      type=int,   default=256, dest="max_tok")
+    parser.add_argument("--grad-checkpoint", action="store_true", default=True,
+                        dest="grad_checkpoint",
+                        help="Enable gradient checkpointing in the roberta encoder "
+                             "(saves ~10x activation memory, ~25%% slower backward; "
+                             "use --no-grad-checkpoint to disable)")
     parser.add_argument("--w-b",          type=float, default=0.5,
                         help="Function head loss weight")
     parser.add_argument("--w-c",          type=float, default=0.5,
@@ -379,7 +389,7 @@ def main():
     parser.add_argument("--dev-frac",     type=float, default=0.2, dest="dev_frac")
     parser.add_argument("--dropout",      type=float, default=0.1)
     parser.add_argument("--seed",         type=int,   default=42)
-    parser.add_argument("--grad-accum",   type=int,   default=4,   dest="grad_accum",
+    parser.add_argument("--grad-accum",   type=int,   default=8,   dest="grad_accum",
                         help="Gradient accumulation steps (effective batch = batch_size × grad_accum)")
     parser.add_argument("--max-docs",     type=int,   default=None, dest="max_docs",
                         help="Limit to N documents (smoke test)")
@@ -423,7 +433,8 @@ def main():
 
     # ── Model ─────────────────────────────────────────────────────────────────
     print(f"Loading encoder ({args.encoder}) ...")
-    model = SegRemover(args.encoder, args.inter_layers, args.dropout).to(device)
+    model = SegRemover(args.encoder, args.inter_layers, args.dropout,
+                       grad_checkpoint=args.grad_checkpoint).to(device)
     n_params = sum(p.numel() for p in model.parameters()) / 1e6
     print(f"  {n_params:.0f}M parameters")
 
@@ -436,6 +447,8 @@ def main():
     eff_batch = args.batch_size * args.grad_accum
     print(f"\nTraining: {args.epochs} epochs, {n_steps} optimizer steps")
     print(f"Batch: {args.batch_size} docs x {args.grad_accum} accum = {eff_batch} effective")
+    print(f"max_segs={args.max_segs}  max_tok={args.max_tok}  "
+          f"grad_checkpoint={args.grad_checkpoint}")
     print(f"Warmup: {warmup} steps  |  Loss weights: A=1.0  B={args.w_b}  C={args.w_c}\n")
 
     best_auc  = 0.0

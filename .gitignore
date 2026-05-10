@@ -3,7 +3,6 @@
 
 # Data (large, not for version control)
 data/
-outputs/
 
 # Models
 models/

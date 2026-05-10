@@ -27,6 +27,7 @@ export HF_HOME=/mnt/beegfsstudents/home/3223837/hf_cache
 export SENTENCE_TRANSFORMERS_HOME=/mnt/beegfsstudents/home/3223837/hf_cache/sentence_transformers
 export TRANSFORMERS_OFFLINE=1
 export HF_DATASETS_OFFLINE=1
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
 source "$(conda info --base)/etc/profile.d/conda.sh"
 conda activate segremover
