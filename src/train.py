@@ -4,11 +4,17 @@ src/train.py — Multi-head BERTSum (segremover)
 Architecture (Liu & Lapata, BERTSum, EMNLP 2019):
   Stage 1  roberta-base applied per segment → one [CLS] embedding per segment
   Stage 2  inter-segment Transformer (2–4 layers) → each segment sees the full doc
-  Head A   p_remove ∈ [0,1]   BCE loss    (primary output)
-  Head B   function 6-class   CE  loss    (regulariser)
-  Head C   disfluency 5-class CE  loss    (regulariser)
+  Head B   function 6-class   CE  loss    (explainer — semantic function)
+  Head C   disfluency 5-class CE  loss    (explainer — disfluency type)
+  Head A   p_remove ∈ [0,1]   BCE loss    (ranker — conditioned on Head B & C logits)
 
-Loss: 1.0 * BCE(A) + 0.5 * CE(B) + 0.5 * CE(C)
+Cascade: Head A input = [h ‖ logit_B ‖ logit_C], making the removal decision
+explicitly dependent on the predicted function class and disfluency type.
+
+Loss: 1.0 * BCE(A) + 1.0 * CE(B) + 1.0 * CE(C)
+
+Defaults: roberta-base, inter_layers=4, max_segs=256, max_tok=384, seg_batch=32.
+For roberta-large: pass --encoder roberta-large --seg-batch 8 --batch-size 1 --grad-accum 16
 
 On HPC, pre-download the encoder on the login node first:
     python -c "from transformers import AutoTokenizer, RobertaModel; \
@@ -17,7 +23,7 @@ On HPC, pre-download the encoder on the login node first:
 
 Usage:
     python src/train.py
-    python src/train.py --encoder roberta-large
+    python src/train.py --encoder roberta-large --seg-batch 16 --batch-size 1 --grad-accum 16
     python src/train.py --max-docs 10   # smoke test
 """
 
@@ -210,7 +216,8 @@ class SegRemover(nn.Module):
               embeddings for a document. All segments now attend to each other,
               giving document-level context (catches cross-segment repetition).
 
-    Heads   — Three linear classifiers on top of Stage 2 output.
+    Heads   — Head B (function) and Head C (disfluency) are linear classifiers.
+              Head A (p_remove) is a 2-layer MLP conditioned on [h ‖ logit_B ‖ logit_C].
     """
 
     def __init__(self, encoder_name: str = "roberta-base",
@@ -232,9 +239,16 @@ class SegRemover(nn.Module):
         )
         self.inter_tf = nn.TransformerEncoder(enc_layer, num_layers=n_inter_layers)
 
-        self.head_a = nn.Linear(d, 1)           # p_remove
-        self.head_b = nn.Linear(d, N_FUNCTION)   # function 6-class
-        self.head_c = nn.Linear(d, N_DISFLUENCY) # disfluency 5-class
+        self.head_b = nn.Linear(d, N_FUNCTION)   # function 6-class (explainer)
+        self.head_c = nn.Linear(d, N_DISFLUENCY) # disfluency 5-class (explainer)
+        # Head A is conditioned on Head B and C logits — the "ranker" is explicitly
+        # driven by the model's own explanations of function and disfluency type.
+        self.head_a = nn.Sequential(
+            nn.Linear(d + N_FUNCTION + N_DISFLUENCY, d // 4),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(d // 4, 1),
+        )
         self.drop   = nn.Dropout(dropout)
 
     def _encode_segments(self, input_ids, attention_mask, seg_batch: int):
@@ -274,11 +288,12 @@ class SegRemover(nn.Module):
         segs_ctx = torch.cat([inter[i, :L] for i, L in enumerate(doc_lengths)], dim=0)
         segs_ctx = self.drop(segs_ctx)
 
-        return (
-            self.head_a(segs_ctx).squeeze(-1),  # (N,)   logits for p_remove
-            self.head_b(segs_ctx),              # (N, 6)
-            self.head_c(segs_ctx),              # (N, 5)
-        )
+        # Explainer heads run first; ranker head is conditioned on their outputs
+        logit_b = self.head_b(segs_ctx)                              # (N, 6)
+        logit_c = self.head_c(segs_ctx)                              # (N, 5)
+        combined = torch.cat([segs_ctx, logit_b, logit_c], dim=-1)   # (N, d+11)
+        logit_a  = self.head_a(combined).squeeze(-1)                 # (N,)
+        return logit_a, logit_b, logit_c
 
 
 # ── Loss & utilities ──────────────────────────────────────────────────────────
@@ -373,18 +388,18 @@ def main():
     parser.add_argument("--seg-batch",    type=int,   default=32,  dest="seg_batch",
                         help="Segments per roberta forward pass (memory control)")
     parser.add_argument("--lr",           type=float, default=2e-5)
-    parser.add_argument("--inter-layers", type=int,   default=2,   dest="inter_layers")
-    parser.add_argument("--max-segs",     type=int,   default=128, dest="max_segs",
+    parser.add_argument("--inter-layers", type=int,   default=4,   dest="inter_layers")
+    parser.add_argument("--max-segs",     type=int,   default=256, dest="max_segs",
                         help="Max segments per document (truncates longer docs)")
-    parser.add_argument("--max-tok",      type=int,   default=256, dest="max_tok")
+    parser.add_argument("--max-tok",      type=int,   default=384, dest="max_tok")
     parser.add_argument("--grad-checkpoint", action="store_true", default=True,
                         dest="grad_checkpoint",
                         help="Enable gradient checkpointing in the roberta encoder "
                              "(saves ~10x activation memory, ~25%% slower backward; "
                              "use --no-grad-checkpoint to disable)")
-    parser.add_argument("--w-b",          type=float, default=0.5,
+    parser.add_argument("--w-b",          type=float, default=1.0,
                         help="Function head loss weight")
-    parser.add_argument("--w-c",          type=float, default=0.5,
+    parser.add_argument("--w-c",          type=float, default=1.0,
                         help="Disfluency head loss weight")
     parser.add_argument("--dev-frac",     type=float, default=0.2, dest="dev_frac")
     parser.add_argument("--dropout",      type=float, default=0.1)
@@ -540,6 +555,7 @@ def main():
         "dropout":      args.dropout,
         "max_segs":     args.max_segs,
         "max_tok":      args.max_tok,
+        "seg_batch":    args.seg_batch,
         "temperature":  T,
         "best_dev_auc": round(best_auc, 4),
         "dev_ece":      round(ece_val, 4),

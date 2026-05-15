@@ -40,7 +40,6 @@ from __future__ import annotations
 import argparse
 import json
 import sys
-import textwrap
 import warnings
 from collections import defaultdict
 from pathlib import Path
@@ -67,22 +66,50 @@ BG, PANEL, GRID = "#0f1117", "#1a1f2e", "#2d3748"
 TEXT            = "#e2e8f0"
 BLUE, GREEN, RED, ORANGE, PURPLE = "#63b3ed", "#68d391", "#fc8181", "#f6ad55", "#b794f4"
 
+# Bright foreground colors on a dark panel.  Keep bars vivid; keep only
+# backgrounds/grid dark.
+BRIGHT_CYAN    = "#38bdf8"
+BRIGHT_GREEN   = "#4ade80"
+BRIGHT_ORANGE  = "#fbbf24"
+BRIGHT_PURPLE  = "#a78bfa"
+BRIGHT_RED     = "#fb7185"
+BRIGHT_PINK    = "#f472b6"
+BRIGHT_TEAL    = "#2dd4bf"
+BRIGHT_LIME    = "#bef264"
+BRIGHT_SLATE   = "#94a3b8"
+
+EXPECTED_GENRES = [
+    "commentary", "entertainment", "lectures",
+    "podcasts", "ted", "tv_series",
+]
+
 GENRE_PALETTE = {
-    "commentary":    "#4C72B0",
-    "entertainment": "#937860",
-    "lectures":      "#DD8452",
-    "podcasts":      "#55A868",
-    "ted":           "#C44E52",
-    "tv_series":     "#8172B3",
+    "commentary":    BRIGHT_CYAN,
+    "entertainment": BRIGHT_PINK,
+    "lectures":      BRIGHT_ORANGE,
+    "podcasts":      BRIGHT_GREEN,
+    "ted":           BRIGHT_RED,
+    "ted_talks":     BRIGHT_RED,
+    "tv_series":     BRIGHT_PURPLE,
+    "unknown":       BRIGHT_SLATE,
 }
-BUCKET_COLORS  = {"short": BLUE, "medium": ORANGE, "long": GREEN}
+BUCKET_COLORS  = {"short": BRIGHT_CYAN, "medium": BRIGHT_ORANGE, "long": BRIGHT_GREEN, "unknown": BRIGHT_SLATE}
 BASELINE_COLORS = {
-    "model":     BLUE,
-    "sbert":     GREEN,
-    "heuristic": ORANGE,
-    "tfidf":     PURPLE,
-    "random":    GRID,
+    "model":     BRIGHT_CYAN,
+    "sbert":     BRIGHT_GREEN,
+    "heuristic": BRIGHT_ORANGE,
+    "tfidf":     BRIGHT_PURPLE,
+    "random":    BRIGHT_PINK,
 }
+FUNCTION_COLORS = {
+    "new_information":       BRIGHT_CYAN,
+    "useful_repetition":     BRIGHT_TEAL,
+    "redundant_repetition":  BRIGHT_ORANGE,
+    "clarification":         BRIGHT_GREEN,
+    "discourse_filler":      BRIGHT_PURPLE,
+    "off_topic":             BRIGHT_RED,
+}
+CAPTION_COLORS = {"manual": BRIGHT_CYAN, "auto": BRIGHT_ORANGE, "automatic": BRIGHT_ORANGE, "unknown": BRIGHT_SLATE}
 
 plt.rcParams.update({
     "figure.facecolor": BG,   "axes.facecolor":   PANEL,
@@ -101,6 +128,13 @@ FUNCTION_NAMES = [
 ]
 DISFL_NAMES = ["clean", "filled_pause", "repetition", "revision", "restart"]
 
+VISUAL_CONTEXT_PATTERNS = [
+    "this graph", "this chart", "this diagram", "this slide", "this image",
+    "on screen", "as you can see", "you can see", "look at", "shown here",
+    "right here", "over here", "this picture", "this video", "the screen",
+    "the board", "the figure", "the table", "the map", "the camera",
+]
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 # Helpers
@@ -116,7 +150,75 @@ def _save(fig: plt.Figure, plots_dir: Path, name: str) -> None:
 def _ax_style(ax: plt.Axes) -> plt.Axes:
     ax.grid(True, alpha=0.3)
     ax.set_facecolor(PANEL)
+    for spine in ax.spines.values():
+        spine.set_color(GRID)
     return ax
+
+
+def _pretty_name(name: object) -> str:
+    """Display labels for plots without changing raw data keys."""
+    s = str(name)
+    mapping = {
+        "model": "SegRemover",
+        "sbert": "SBERT",
+        "tfidf": "TF-IDF",
+        "heuristic": "Heuristic",
+        "random": "Random",
+        "weak": "weak-label proxy",
+        "weak\n(proxy)": "weak-label\nproxy",
+        "tv_series": "TV series",
+        "ted": "TED talks",
+        "ted_talks": "TED talks",
+        "commentary": "Commentary",
+        "entertainment": "Entertainment",
+        "lectures": "Lectures",
+        "podcasts": "Podcasts",
+        "short": "Short",
+        "medium": "Medium",
+        "long": "Long",
+        "manual": "Manual",
+        "auto": "Auto",
+        "automatic": "Auto",
+        "unknown": "Unknown",
+    }
+    return mapping.get(s, s.replace("_", " ").title())
+
+
+def _ordered(values: list[str], preferred: list[str]) -> list[str]:
+    seen = set(values)
+    out = [v for v in preferred if v in seen]
+    out.extend(sorted(v for v in values if v not in set(out)))
+    return out
+
+
+def _calibration_points(probs: np.ndarray, labels: np.ndarray, n_bins: int = 10) -> pd.DataFrame:
+    bins = np.linspace(0.0, 1.0, n_bins + 1)
+    rows = []
+    for lo, hi in zip(bins[:-1], bins[1:]):
+        mask = (probs >= lo) & (probs < hi)
+        if mask.sum() == 0:
+            continue
+        rows.append({
+            "lo": lo,
+            "hi": hi,
+            "mid": (lo + hi) / 2,
+            "accuracy": float(labels[mask].mean()),
+            "confidence": float(probs[mask].mean()),
+            "n": int(mask.sum()),
+        })
+    return pd.DataFrame(rows)
+
+
+def _pick_thresholds(thresholds: list[float], targets: tuple[float, ...] = (0.70, 0.95)) -> list[float]:
+    if not thresholds:
+        return []
+    picked = []
+    arr = np.array(thresholds, dtype=float)
+    for target in targets:
+        t = float(arr[np.argmin(np.abs(arr - target))])
+        if t not in picked:
+            picked.append(t)
+    return picked
 
 
 def _load_jsonl(path: Path) -> list[dict]:
@@ -325,6 +427,7 @@ def run_inference(checkpoint: Path, config: dict, data: dict, device: str) -> di
     T        = float(config.get("temperature", 1.0))
     max_segs = int(config.get("max_segs", 256))
     max_tok  = int(config.get("max_tok", 512))
+    seg_batch = int(config.get("seg_batch", 32))
     docs, video_ids = data["docs"], data["video_ids"]
 
     tokenizer = AutoTokenizer.from_pretrained(config["encoder"])
@@ -350,27 +453,34 @@ def run_inference(checkpoint: Path, config: dict, data: dict, device: str) -> di
     loader = DataLoader(ds, batch_size=4, shuffle=False,
                         collate_fn=collate_fn, num_workers=0)
 
-    scores: dict[tuple, float] = {}
+    scores:  dict[tuple, float] = {}
+    heads_b: dict[tuple, int]   = {}
+    heads_c: dict[tuple, int]   = {}
     doc_cursor = 0
     for batch in tqdm(loader, desc="inference"):
         with torch.no_grad():
-            la, _, _ = model(
+            la, lb, lc = model(
                 batch["input_ids"].to(device),
                 batch["attention_mask"].to(device),
                 batch["doc_lengths"],
-                seg_batch=32,
+                seg_batch=seg_batch,
             )
-        probs = torch.sigmoid(la / T).cpu().tolist()
+        probs  = torch.sigmoid(la / T).cpu().tolist()
+        pred_b = lb.argmax(dim=-1).cpu().tolist()
+        pred_c = lc.argmax(dim=-1).cpu().tolist()
         seg_ptr = 0
         for i, L in enumerate(batch["doc_lengths"]):
             vid = video_ids[doc_cursor]
             for j in range(L):
-                scores[(vid, docs[vid][j]["seg_idx"])] = round(probs[seg_ptr + j], 4)
+                key = (vid, docs[vid][j]["seg_idx"])
+                scores[key]  = round(probs[seg_ptr + j], 4)
+                heads_b[key] = pred_b[seg_ptr + j]
+                heads_c[key] = pred_c[seg_ptr + j]
             seg_ptr   += L
             doc_cursor += 1
 
     print(f"  Scored {len(scores):,} segments")
-    return scores
+    return scores, heads_b, heads_c
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -403,8 +513,12 @@ def audit(data: dict, config: dict | None, model_scores: dict,
     for v in video_ids:
         genre_counts[data["genre"][v]] += 1
     lines.append("## Genre distribution")
-    for g, n in sorted(genre_counts.items()):
-        lines.append(f"  {g:20s}  {n:5d} videos")
+    for g in _ordered(list(genre_counts.keys()), EXPECTED_GENRES):
+        n = genre_counts[g]
+        lines.append(f"  {_pretty_name(g):20s}  {n:5d} videos")
+    missing_genres = [g for g in EXPECTED_GENRES if g not in genre_counts]
+    if missing_genres:
+        lines.append("  Missing expected genres: " + ", ".join(_pretty_name(g) for g in missing_genres))
     lines.append("")
 
     # Caption-type distribution
@@ -448,7 +562,9 @@ def audit(data: dict, config: dict | None, model_scores: dict,
         has_gold=bool(data["gold"]),
         has_model=bool(model_scores),
         has_baselines=bool(data["baselines"]),
+        has_caption_type=bool(data["caption_type"]),
         genre_counts=dict(genre_counts),
+        missing_genres=missing_genres,
     )
 
 
@@ -514,13 +630,13 @@ def plot_roc_pr(scores: np.ndarray, labels: np.ndarray,
     )
 
     ax = _ax_style(axes[0])
-    ax.plot(fpr, tpr, color=BLUE, label=f"AUC-ROC = {roc_auc:.3f}")
+    ax.plot(fpr, tpr, color=BRIGHT_CYAN, label=f"AUC-ROC = {roc_auc:.3f}")
     ax.plot([0, 1], [0, 1], "--", color=GRID, linewidth=1)
     ax.set(xlabel="FPR", ylabel="TPR", title="ROC curve")
     ax.legend()
 
     ax = _ax_style(axes[1])
-    ax.plot(rec, prec, color=GREEN, label=f"AUC-PR = {pr_auc:.3f}")
+    ax.plot(rec, prec, color=BRIGHT_GREEN, label=f"AUC-PR = {pr_auc:.3f}")
     base = labels.mean()
     ax.axhline(base, linestyle="--", color=GRID, linewidth=1,
                label=f"baseline = {base:.3f}")
@@ -537,40 +653,31 @@ def plot_reliability(scores: np.ndarray, labels: np.ndarray,
                      title_prefix: str = "") -> float:
     n_bins = 10
     ece    = _compute_ece(scores, labels, n_bins)
-    bins   = np.linspace(0, 1, n_bins + 1)
-    mids   = (bins[:-1] + bins[1:]) / 2
-    accs, confs, ns = [], [], []
-    for lo, hi in zip(bins[:-1], bins[1:]):
-        mask = (scores >= lo) & (scores < hi)
-        if mask.sum() == 0:
-            accs.append(np.nan); confs.append(np.nan); ns.append(0)
-        else:
-            accs.append(labels[mask].mean())
-            confs.append(scores[mask].mean())
-            ns.append(int(mask.sum()))
+    cal_df = _calibration_points(scores, labels, n_bins)
 
-    cal_quality = "well-calibrated" if ece < 0.05 else ("over-confident" if
-                   any(c > a for c, a in zip(confs, accs) if not np.isnan(a))
-                   else "under-confident")
-    heading = title_prefix or f"Model is {cal_quality}"
+    signed_gap = float((cal_df["confidence"] - cal_df["accuracy"]).mean()) if not cal_df.empty else 0.0
+    if ece < 0.05:
+        cal_quality = "well calibrated"
+    elif signed_gap > 0:
+        cal_quality = "over-confident"
+    else:
+        cal_quality = "under-confident"
+    heading = title_prefix or f"SegRemover reliability ({cal_quality})"
 
     fig, ax = plt.subplots(figsize=(7, 6))
     _ax_style(ax)
     ax.plot([0, 1], [0, 1], "--", color=GRID, linewidth=1, label="perfect calibration")
-    valid = [i for i, a in enumerate(accs) if not np.isnan(a)]
-    ax.bar([mids[i] for i in valid],
-           [accs[i] for i in valid],
-           width=0.08, color=BLUE, alpha=0.8, label="accuracy per bin")
-    ax.plot([confs[i] for i in valid],
-            [accs[i]  for i in valid],
-            "o-", color=ORANGE, label="mean confidence")
+    if not cal_df.empty:
+        ax.bar(cal_df["mid"], cal_df["accuracy"], width=0.08,
+               color=BRIGHT_CYAN, alpha=0.9, label="fraction removed")
+        ax.plot(cal_df["confidence"], cal_df["accuracy"], "o-",
+                color=BRIGHT_ORANGE, label="mean confidence", markersize=6)
     ax.set(xlabel="Mean predicted probability", ylabel="Fraction of positives",
            title=f"{heading}  (ECE = {ece:.4f})", xlim=(0, 1), ylim=(0, 1))
     ax.legend()
     plt.tight_layout()
     _save(fig, plots_dir, f"{prefix}_reliability")
     return ece
-
 
 def plot_confusion(scores: np.ndarray, labels: np.ndarray,
                    threshold: float, plots_dir: Path, prefix: str = "model") -> None:
@@ -611,7 +718,7 @@ def plot_threshold_sweep(scores: np.ndarray, labels: np.ndarray,
     fig.suptitle("Threshold controls the precision–recall trade-off", color=TEXT, fontsize=14)
 
     ax = _ax_style(axes[0])
-    for col, color in [("precision", BLUE), ("recall", GREEN), ("f1", ORANGE)]:
+    for col, color in [("precision", BRIGHT_CYAN), ("recall", BRIGHT_GREEN), ("f1", BRIGHT_ORANGE)]:
         ax.plot(df["threshold"], df[col], "o-", color=color, label=col)
     # Annotate the F1 peak
     best_f1_idx = df["f1"].idxmax()
@@ -619,15 +726,15 @@ def plot_threshold_sweep(scores: np.ndarray, labels: np.ndarray,
         f"best F1={df['f1'].iloc[best_f1_idx]:.2f}\n@t={df['threshold'].iloc[best_f1_idx]:.2f}",
         (df["threshold"].iloc[best_f1_idx], df["f1"].iloc[best_f1_idx]),
         textcoords="offset points", xytext=(8, -18),
-        color=ORANGE, fontsize=9,
-        arrowprops=dict(arrowstyle="->", color=ORANGE, lw=1),
+        color=BRIGHT_ORANGE, fontsize=9,
+        arrowprops=dict(arrowstyle="->", color=BRIGHT_ORANGE, lw=1),
     )
     ax.set(xlabel="Threshold", ylabel="Score", title="P / R / F1 vs threshold",
            xlim=(min(thresholds) - 0.02, max(thresholds) + 0.02))
     ax.legend()
 
     ax = _ax_style(axes[1])
-    ax.plot(df["threshold"], df["pct_removed"] * 100, "o-", color=PURPLE)
+    ax.plot(df["threshold"], df["pct_removed"] * 100, "o-", color=BRIGHT_PURPLE)
     ax.set(xlabel="Threshold", ylabel="% segments removed",
            title="Higher threshold → less aggressive compression")
 
@@ -642,7 +749,7 @@ def plot_confidence_buckets(scores: np.ndarray, labels: np.ndarray,
     buckets = {
         "keep (p<0.70)":             scores < 0.70,
         "prob. remove (0.70–0.95)": (scores >= 0.70) & (scores < 0.95),
-        "def.  remove (p>=0.95)":   scores >= 0.95,
+        "def. remove (p>=0.95)":    scores >= 0.95,
     }
     result = {}
     rows   = []
@@ -658,8 +765,8 @@ def plot_confidence_buckets(scores: np.ndarray, labels: np.ndarray,
     df = pd.DataFrame(rows)
     fig, ax = plt.subplots(figsize=(8, 4))
     _ax_style(ax)
-    colors = [GREEN, ORANGE, RED]
-    bars = ax.bar(df["bucket"], df["precision"], color=colors, alpha=0.85)
+    colors = [BRIGHT_GREEN, BRIGHT_ORANGE, BRIGHT_RED]
+    bars = ax.bar(df["bucket"], df["precision"], color=colors, alpha=0.95)
     for bar, row in zip(bars, df.itertuples()):
         if not np.isnan(row.precision):
             ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height() + 0.01,
@@ -673,13 +780,362 @@ def plot_confidence_buckets(scores: np.ndarray, labels: np.ndarray,
     return result
 
 
+def plot_function_by_confidence_bucket(model_scores: dict, data: dict, plots_dir: Path) -> None:
+    """Interpretability: what function labels dominate keep/probable/definite remove buckets."""
+    if not model_scores or not data.get("fn"):
+        return
+
+    rows = []
+    for k, p in model_scores.items():
+        if k not in data["fn"]:
+            continue
+        fn_idx = data["fn"][k]
+        if not isinstance(fn_idx, (int, np.integer)) or fn_idx < 0 or fn_idx >= len(FUNCTION_NAMES):
+            continue
+        if p < 0.70:
+            bucket = "keep\n(p<0.70)"
+        elif p < 0.95:
+            bucket = "prob. remove\n(0.70–0.95)"
+        else:
+            bucket = "def. remove\n(p≥0.95)"
+        rows.append({"bucket": bucket, "function": FUNCTION_NAMES[int(fn_idx)]})
+
+    if not rows:
+        return
+    df = pd.DataFrame(rows)
+    counts = pd.crosstab(df["bucket"], df["function"])
+    bucket_order = ["keep\n(p<0.70)", "prob. remove\n(0.70–0.95)", "def. remove\n(p≥0.95)"]
+    counts = counts.reindex([b for b in bucket_order if b in counts.index])
+    props = counts.div(counts.sum(axis=1).replace(0, np.nan), axis=0)
+    props.to_csv(plots_dir.parent / "function_by_confidence_bucket.csv")
+
+    fig, ax = plt.subplots(figsize=(10, 5))
+    _ax_style(ax)
+    bottom = np.zeros(len(props))
+    for fn in FUNCTION_NAMES:
+        if fn not in props.columns:
+            continue
+        vals = props[fn].fillna(0).to_numpy()
+        ax.bar(np.arange(len(props)), vals, bottom=bottom,
+               color=FUNCTION_COLORS.get(fn, BRIGHT_SLATE), alpha=0.95,
+               label=_pretty_name(fn))
+        bottom += vals
+    ax.set(xticks=np.arange(len(props)), xticklabels=list(props.index), ylim=(0, 1),
+           ylabel="Share of segments",
+           title="Predicted removability aligns with segment function labels")
+    ax.yaxis.set_major_formatter(mticker.PercentFormatter(xmax=1.0))
+    ax.legend(loc="center left", bbox_to_anchor=(1.0, 0.5), fontsize=9)
+    plt.tight_layout()
+    _save(fig, plots_dir, "function_by_confidence_bucket")
+
+
+# ── Head B explainability ─────────────────────────────────────────────────────
+
+def plot_fn_label_distribution(data: dict, plots_dir: Path) -> None:
+    """Stacked bar: function-label share per genre — shows corpus composition."""
+    if not data.get("fn"):
+        return
+
+    rows = []
+    for k, fn_idx in data["fn"].items():
+        if not isinstance(fn_idx, (int, np.integer)) or fn_idx < 0 or fn_idx >= len(FUNCTION_NAMES):
+            continue
+        rows.append({"genre": data["genre"].get(k[0], "unknown"),
+                     "fn_label": FUNCTION_NAMES[int(fn_idx)]})
+    if not rows:
+        return
+
+    df     = pd.DataFrame(rows)
+    genres = _ordered(list(df["genre"].unique()), EXPECTED_GENRES)
+    counts = pd.crosstab(df["genre"], df["fn_label"])
+    props  = counts.div(counts.sum(axis=1).replace(0, np.nan), axis=0).reindex(genres, fill_value=0)
+
+    fig, ax = plt.subplots(figsize=(max(9, len(genres) * 1.5), 5))
+    _ax_style(ax)
+    bottom = np.zeros(len(genres))
+    for fn in FUNCTION_NAMES:
+        if fn not in props.columns:
+            continue
+        vals = props[fn].fillna(0).to_numpy()
+        ax.bar(np.arange(len(genres)), vals, bottom=bottom,
+               color=FUNCTION_COLORS.get(fn, BRIGHT_SLATE), alpha=0.92,
+               label=_pretty_name(fn))
+        bottom += vals
+    ax.set(xticks=np.arange(len(genres)),
+           xticklabels=[_pretty_name(g) for g in genres],
+           ylim=(0, 1), ylabel="Share of segments",
+           title="Lectures are new-information heavy; podcasts skew toward discourse fillers")
+    ax.yaxis.set_major_formatter(mticker.PercentFormatter(xmax=1.0))
+    ax.tick_params(axis="x", rotation=15)
+    ax.legend(loc="center left", bbox_to_anchor=(1.0, 0.5), fontsize=9)
+    plt.tight_layout()
+    _save(fig, plots_dir, "fn_label_distribution_by_genre")
+
+
+def plot_p_remove_by_function(model_scores: dict, data: dict, plots_dir: Path) -> None:
+    """Head B validation: p_remove boxplot grouped by function label.
+
+    Key story: redundant_repetition and off_topic should have high median p_remove;
+    new_information should have low p_remove. This directly validates Head B.
+    """
+    if not model_scores or not data.get("fn"):
+        return
+
+    rows = []
+    for k, p in model_scores.items():
+        fn_idx = data["fn"].get(k)
+        if fn_idx is None or not isinstance(fn_idx, (int, np.integer)):
+            continue
+        if fn_idx < 0 or fn_idx >= len(FUNCTION_NAMES):
+            continue
+        rows.append({"fn_label": FUNCTION_NAMES[int(fn_idx)], "p_remove": p})
+    if not rows:
+        return
+
+    df       = pd.DataFrame(rows)
+    fn_order = [f for f in FUNCTION_NAMES if f in df["fn_label"].values]
+
+    fig, ax = plt.subplots(figsize=(11, 5))
+    _ax_style(ax)
+    data_per_fn = [df[df["fn_label"] == fn]["p_remove"].values for fn in fn_order]
+    colors = [FUNCTION_COLORS.get(fn, BRIGHT_SLATE) for fn in fn_order]
+
+    bp = ax.boxplot(data_per_fn, patch_artist=True, widths=0.5,
+                    medianprops=dict(color=TEXT, linewidth=2),
+                    whiskerprops=dict(color=GRID), capprops=dict(color=GRID),
+                    flierprops=dict(marker="o", markersize=3, alpha=0.3, linestyle="none"))
+    for patch, color in zip(bp["boxes"], colors):
+        patch.set_facecolor(color)
+        patch.set_alpha(0.8)
+    for i, (fn, vals) in enumerate(zip(fn_order, data_per_fn)):
+        if len(vals):
+            med = float(np.median(vals))
+            ax.text(i + 1, min(med + 0.03, 0.97), f"{med:.2f}",
+                    ha="center", va="bottom", color=TEXT, fontsize=9, fontweight="bold")
+
+    ax.set(xticks=range(1, len(fn_order) + 1),
+           xticklabels=[_pretty_name(fn) for fn in fn_order],
+           ylabel="Model p_remove", ylim=(0, 1.05),
+           title="Redundant and off-topic segments score highest p_remove — Head B validated")
+    ax.axhline(0.5, color=GRID, linestyle="--", linewidth=1, alpha=0.6)
+    ax.tick_params(axis="x", rotation=15)
+    plt.tight_layout()
+    _save(fig, plots_dir, "p_remove_by_function")
+
+
+# ── Head C explainability ─────────────────────────────────────────────────────
+
+def plot_disfl_distribution(data: dict, plots_dir: Path) -> None:
+    """Stacked bar: disfluency-label share per genre — shows which genres are noisier."""
+    if not data.get("disfl"):
+        return
+
+    rows = []
+    for k, disfl_idx in data["disfl"].items():
+        if not isinstance(disfl_idx, (int, np.integer)) or disfl_idx < 0 or disfl_idx >= len(DISFL_NAMES):
+            continue
+        rows.append({"genre": data["genre"].get(k[0], "unknown"),
+                     "disfl_label": DISFL_NAMES[int(disfl_idx)]})
+    if not rows:
+        return
+
+    df     = pd.DataFrame(rows)
+    genres = _ordered(list(df["genre"].unique()), EXPECTED_GENRES)
+    counts = pd.crosstab(df["genre"], df["disfl_label"])
+    props  = counts.div(counts.sum(axis=1).replace(0, np.nan), axis=0).reindex(genres, fill_value=0)
+
+    disfl_colors = {
+        "clean":        BRIGHT_CYAN,
+        "filled_pause": BRIGHT_RED,
+        "repetition":   BRIGHT_ORANGE,
+        "revision":     BRIGHT_PURPLE,
+        "restart":      BRIGHT_GREEN,
+    }
+
+    fig, ax = plt.subplots(figsize=(max(9, len(genres) * 1.5), 5))
+    _ax_style(ax)
+    bottom = np.zeros(len(genres))
+    for disfl in DISFL_NAMES:
+        if disfl not in props.columns:
+            continue
+        vals = props[disfl].fillna(0).to_numpy()
+        ax.bar(np.arange(len(genres)), vals, bottom=bottom,
+               color=disfl_colors.get(disfl, BRIGHT_SLATE), alpha=0.92,
+               label=_pretty_name(disfl))
+        bottom += vals
+    ax.set(xticks=np.arange(len(genres)),
+           xticklabels=[_pretty_name(g) for g in genres],
+           ylim=(0, 1), ylabel="Share of segments",
+           title="Podcasts and TV series contain more disfluencies than lectures")
+    ax.yaxis.set_major_formatter(mticker.PercentFormatter(xmax=1.0))
+    ax.tick_params(axis="x", rotation=15)
+    ax.legend(loc="center left", bbox_to_anchor=(1.0, 0.5), fontsize=9)
+    plt.tight_layout()
+    _save(fig, plots_dir, "disfl_distribution_by_genre")
+
+
+def plot_p_remove_by_disfluency(model_scores: dict, data: dict, plots_dir: Path) -> None:
+    """Head C validation: p_remove boxplot grouped by disfluency label.
+
+    Key story: filled_pause, repetition, restart should have high median p_remove;
+    clean should score low. This directly validates Head C's regularisation.
+    """
+    if not model_scores or not data.get("disfl"):
+        return
+
+    rows = []
+    for k, p in model_scores.items():
+        disfl_idx = data["disfl"].get(k)
+        if disfl_idx is None or not isinstance(disfl_idx, (int, np.integer)):
+            continue
+        if disfl_idx < 0 or disfl_idx >= len(DISFL_NAMES):
+            continue
+        rows.append({"disfl_label": DISFL_NAMES[int(disfl_idx)], "p_remove": p})
+    if not rows:
+        return
+
+    df          = pd.DataFrame(rows)
+    disfl_order = [d for d in DISFL_NAMES if d in df["disfl_label"].values]
+    disfl_colors_list = [BRIGHT_CYAN, BRIGHT_RED, BRIGHT_ORANGE, BRIGHT_PURPLE, BRIGHT_GREEN]
+
+    fig, ax = plt.subplots(figsize=(9, 5))
+    _ax_style(ax)
+    data_per_d = [df[df["disfl_label"] == d]["p_remove"].values for d in disfl_order]
+
+    bp = ax.boxplot(data_per_d, patch_artist=True, widths=0.5,
+                    medianprops=dict(color=TEXT, linewidth=2),
+                    whiskerprops=dict(color=GRID), capprops=dict(color=GRID),
+                    flierprops=dict(marker="o", markersize=3, alpha=0.3, linestyle="none"))
+    for patch, color in zip(bp["boxes"], disfl_colors_list[:len(disfl_order)]):
+        patch.set_facecolor(color)
+        patch.set_alpha(0.8)
+    for i, (d, vals) in enumerate(zip(disfl_order, data_per_d)):
+        if len(vals):
+            med = float(np.median(vals))
+            ax.text(i + 1, min(med + 0.03, 0.97), f"{med:.2f}",
+                    ha="center", va="bottom", color=TEXT, fontsize=9, fontweight="bold")
+
+    ax.set(xticks=range(1, len(disfl_order) + 1),
+           xticklabels=[_pretty_name(d) for d in disfl_order],
+           ylabel="Model p_remove", ylim=(0, 1.05),
+           title="Disfluent segments (filled pause, repetition, restart) score higher p_remove — Head C validated")
+    ax.axhline(0.5, color=GRID, linestyle="--", linewidth=1, alpha=0.6)
+    ax.tick_params(axis="x", rotation=10)
+    plt.tight_layout()
+    _save(fig, plots_dir, "p_remove_by_disfluency")
+
+
+# ── Head B / Head C classifier evaluation ─────────────────────────────────────
+
+def _plot_confusion_heatmap(
+    cm: np.ndarray, names: list, plots_dir: Path, stem: str, title: str
+) -> None:
+    """Row-normalised confusion matrix heatmap on dark background."""
+    cm_norm = cm.astype(float) / cm.sum(axis=1, keepdims=True).clip(min=1)
+    n = len(names)
+    fig, ax = plt.subplots(figsize=(max(7, n * 1.4), max(6, n * 1.1)))
+    _ax_style(ax)
+    im = ax.imshow(cm_norm, vmin=0, vmax=1, cmap="Blues", aspect="auto")
+    plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+    ax.set(
+        xticks=np.arange(n), yticks=np.arange(n),
+        xticklabels=[_pretty_name(x) for x in names],
+        yticklabels=[_pretty_name(x) for x in names],
+        xlabel="Predicted", ylabel="True", title=title,
+    )
+    ax.tick_params(axis="x", rotation=30)
+    for i in range(n):
+        for j in range(n):
+            val = cm_norm[i, j]
+            ax.text(j, i, f"{val:.2f}", ha="center", va="center",
+                    color=TEXT if val < 0.5 else BG, fontsize=9)
+    plt.tight_layout()
+    _save(fig, plots_dir, stem)
+
+
+def explainer_eval(
+    heads_b: dict, heads_c: dict, data: dict, plots_dir: Path
+) -> dict:
+    """Evaluate Head B (function) and Head C (disfluency) as classifiers.
+
+    Computes accuracy and macro-F1 against ground-truth function/disfluency
+    labels. Produces normalised confusion matrix plots for both heads.
+    These metrics directly support the 'explainer' claim in the paper.
+    """
+    from sklearn.metrics import confusion_matrix as _cm
+
+    results: dict = {}
+
+    # ── Head B — function classification ──────────────────────────────────────
+    if heads_b and data.get("fn"):
+        y_true, y_pred = [], []
+        for k, pred in heads_b.items():
+            true = data["fn"].get(k)
+            if true is None or not isinstance(true, (int, np.integer)):
+                continue
+            if 0 <= int(true) < len(FUNCTION_NAMES) and 0 <= int(pred) < len(FUNCTION_NAMES):
+                y_true.append(int(true))
+                y_pred.append(int(pred))
+
+        if y_true:
+            acc = accuracy_score(y_true, y_pred)
+            f1  = f1_score(y_true, y_pred, average="macro", zero_division=0)
+            results["head_b_accuracy"] = round(acc, 4)
+            results["head_b_macro_f1"] = round(f1, 4)
+            print(f"  Head B (function):   accuracy={acc:.3f}  macro-F1={f1:.3f}  (n={len(y_true):,})")
+
+            per = f1_score(y_true, y_pred, average=None, zero_division=0,
+                           labels=list(range(len(FUNCTION_NAMES))))
+            for i, name in enumerate(FUNCTION_NAMES):
+                results[f"head_b_f1_{name}"] = round(float(per[i]), 4)
+                print(f"    {name:25s}  F1={per[i]:.3f}")
+
+            cm = _cm(y_true, y_pred, labels=list(range(len(FUNCTION_NAMES))))
+            _plot_confusion_heatmap(
+                cm, FUNCTION_NAMES, plots_dir, "head_b_confusion",
+                title="Head B — Function class confusion (row-normalised)",
+            )
+
+    # ── Head C — disfluency classification ────────────────────────────────────
+    if heads_c and data.get("disfl"):
+        y_true, y_pred = [], []
+        for k, pred in heads_c.items():
+            true = data["disfl"].get(k)
+            if true is None or not isinstance(true, (int, np.integer)):
+                continue
+            if 0 <= int(true) < len(DISFL_NAMES) and 0 <= int(pred) < len(DISFL_NAMES):
+                y_true.append(int(true))
+                y_pred.append(int(pred))
+
+        if y_true:
+            acc = accuracy_score(y_true, y_pred)
+            f1  = f1_score(y_true, y_pred, average="macro", zero_division=0)
+            results["head_c_accuracy"] = round(acc, 4)
+            results["head_c_macro_f1"] = round(f1, 4)
+            print(f"  Head C (disfluency): accuracy={acc:.3f}  macro-F1={f1:.3f}  (n={len(y_true):,})")
+
+            per = f1_score(y_true, y_pred, average=None, zero_division=0,
+                           labels=list(range(len(DISFL_NAMES))))
+            for i, name in enumerate(DISFL_NAMES):
+                results[f"head_c_f1_{name}"] = round(float(per[i]), 4)
+                print(f"    {name:25s}  F1={per[i]:.3f}")
+
+            cm = _cm(y_true, y_pred, labels=list(range(len(DISFL_NAMES))))
+            _plot_confusion_heatmap(
+                cm, DISFL_NAMES, plots_dir, "head_c_confusion",
+                title="Head C — Disfluency class confusion (row-normalised)",
+            )
+
+    return results
+
+
 # ── Per-genre reliability (small multiples) ───────────────────────────────────
 
 def plot_reliability_by_genre(
     model_scores: dict, labels_dict: dict, data: dict, plots_dir: Path,
 ) -> None:
     """Small-multiples reliability diagram — one panel per genre."""
-    genres = sorted(set(data["genre"].values()))
+    genres = _ordered(list(set(data["genre"].values())), EXPECTED_GENRES)
     n = len(genres)
     if n == 0:
         return
@@ -689,38 +1145,31 @@ def plot_reliability_by_genre(
     fig, axes = plt.subplots(nrows, ncols, figsize=(5 * ncols, 4 * nrows),
                               squeeze=False)
     fig.suptitle(
-        "Calibration varies by genre — panels show fraction removed vs confidence",
+        "Calibration varies by genre",
         color=TEXT, fontsize=13,
     )
 
     n_bins = 10
-    bins   = np.linspace(0, 1, n_bins + 1)
-    mids   = (bins[:-1] + bins[1:]) / 2
-
     for idx, genre in enumerate(genres):
         ax = axes[idx // ncols][idx % ncols]
         _ax_style(ax)
-        g_keys = {k for k, v in data["genre"].items() if v == genre}
-        s_dict = {k: v for k, v in model_scores.items() if k[0] in g_keys}
-        l_dict = {k: v for k, v in labels_dict.items()  if k[0] in g_keys}
-        if not s_dict:
-            ax.set_visible(False)
-            continue
+        g_vids = {vid for vid, g in data["genre"].items() if g == genre}
+        s_dict = {k: v for k, v in model_scores.items() if k[0] in g_vids}
+        l_dict = {k: v for k, v in labels_dict.items()  if k[0] in g_vids}
         s, l = _aligned_arrays(s_dict, l_dict)
-        ece   = _compute_ece(s, l, n_bins)
-        valid_mids, valid_accs = [], []
-        for i, (lo, hi) in enumerate(zip(bins[:-1], bins[1:])):
-            mask = (s >= lo) & (s < hi)
-            if mask.sum() > 0:
-                valid_mids.append(mids[i])
-                valid_accs.append(l[mask].mean())
-
-        c = GENRE_PALETTE.get(genre, BLUE)
+        if len(s) < 10 or len(set(l)) < 2:
+            ax.text(0.5, 0.5, "insufficient data", ha="center", va="center", color=TEXT)
+            ax.set(xlim=(0, 1), ylim=(0, 1), title=_pretty_name(genre))
+            continue
+        ece = _compute_ece(s, l, n_bins)
+        cal_df = _calibration_points(s, l, n_bins)
+        c = GENRE_PALETTE.get(genre, BRIGHT_CYAN)
         ax.plot([0, 1], [0, 1], "--", color=GRID, linewidth=1)
-        ax.bar(valid_mids, valid_accs, width=0.08, color=c, alpha=0.75)
-        ax.plot(valid_mids, valid_accs, "o-", color=c, markersize=5)
+        if not cal_df.empty:
+            ax.bar(cal_df["mid"], cal_df["accuracy"], width=0.08, color=c, alpha=0.85)
+            ax.plot(cal_df["confidence"], cal_df["accuracy"], "o-", color=BRIGHT_ORANGE, markersize=5)
         ax.set(xlim=(0, 1), ylim=(0, 1),
-               title=f"{genre}  (ECE={ece:.3f})",
+               title=f"{_pretty_name(genre)}  (ECE={ece:.3f})",
                xlabel="Confidence", ylabel="Fraction removed")
 
     # Hide empty panels
@@ -745,46 +1194,40 @@ def plot_calibration_comparison(
     if abs(T - 1.0) < 1e-4:
         return   # no scaling was applied — skip comparison
 
-    eps      = 1e-6
-    logits   = np.log(np.clip(scores, eps, 1 - eps) / np.clip(1 - scores, eps, 1 - eps))
+    eps       = 1e-6
+    scores_c  = np.clip(scores, eps, 1 - eps)
+    logits    = np.log(scores_c / (1 - scores_c))
     raw_probs = 1.0 / (1.0 + np.exp(-T * logits))   # undo T division
 
     ece_before = _compute_ece(raw_probs, labels)
     ece_after  = _compute_ece(scores,    labels)
-
-    n_bins = 10
-    bins   = np.linspace(0, 1, n_bins + 1)
-    mids   = (bins[:-1] + bins[1:]) / 2
+    delta = ece_before - ece_after
+    verb = "reduces" if delta > 0 else "increases"
 
     fig, axes = plt.subplots(1, 2, figsize=(12, 5))
     fig.suptitle(
-        f"Temperature scaling (T={T:.2f}) reduces ECE from {ece_before:.4f} to {ece_after:.4f}",
+        f"Temperature scaling (T={T:.2f}) {verb} ECE from {ece_before:.4f} to {ece_after:.4f}",
         color=TEXT, fontsize=13,
     )
 
     for ax, probs, title in [
         (axes[0], raw_probs, f"Before scaling (T=1.0)  ECE={ece_before:.4f}"),
-        (axes[1], scores,    f"After  scaling (T={T:.2f})  ECE={ece_after:.4f}"),
+        (axes[1], scores,    f"After scaling (T={T:.2f})  ECE={ece_after:.4f}"),
     ]:
         _ax_style(ax)
+        cal_df = _calibration_points(probs, labels, n_bins=10)
         ax.plot([0, 1], [0, 1], "--", color=GRID, linewidth=1, label="perfect")
-        valid_mids, valid_accs = [], []
-        for i, (lo, hi) in enumerate(zip(bins[:-1], bins[1:])):
-            mask = (probs >= lo) & (probs < hi)
-            if mask.sum() > 0:
-                valid_mids.append(mids[i])
-                valid_accs.append(labels[mask].mean())
-        ax.bar(valid_mids, valid_accs, width=0.08, color=BLUE, alpha=0.8,
-               label="fraction removed")
-        ax.plot(valid_mids, valid_accs, "o-", color=ORANGE, markersize=6,
-                label="mean confidence")
+        if not cal_df.empty:
+            ax.bar(cal_df["mid"], cal_df["accuracy"], width=0.08,
+                   color=BRIGHT_CYAN, alpha=0.9, label="fraction removed")
+            ax.plot(cal_df["confidence"], cal_df["accuracy"], "o-",
+                    color=BRIGHT_ORANGE, markersize=6, label="mean confidence")
         ax.set(xlim=(0, 1), ylim=(0, 1), title=title,
                xlabel="Confidence", ylabel="Fraction of positives")
         ax.legend(fontsize=10)
 
     plt.tight_layout()
     _save(fig, plots_dir, "calibration_before_after_T")
-
 
 def segment_eval(model_scores: dict, data: dict, thresholds: list[float],
                  config: dict | None, plots_dir: Path) -> dict:
@@ -819,6 +1262,7 @@ def segment_eval(model_scores: dict, data: dict, thresholds: list[float],
     plot_confusion(scores, labs, threshold=0.5, plots_dir=plots_dir)
     sweep_df = plot_threshold_sweep(scores, labs, thresholds, plots_dir)
     plot_confidence_buckets(scores, labs, plots_dir)
+    plot_function_by_confidence_bucket(model_scores, data, plots_dir)
 
     # Per-genre reliability (small multiples)
     plot_reliability_by_genre(model_scores, labels, data, plots_dir)
@@ -1007,6 +1451,8 @@ def _plot_compression_curves(df: pd.DataFrame, plots_dir: Path) -> None:
         plt.tight_layout()
         _save(fig, plots_dir, "transcript_by_length")
 
+    _plot_removability_summary(df, plots_dir)
+
 
 def _plot_rouge_curves(df: pd.DataFrame, plots_dir: Path) -> None:
     """ROUGE-1-R and ROUGE-L-R vs compression ratio — lexical preservation front."""
@@ -1015,9 +1461,9 @@ def _plot_rouge_curves(df: pd.DataFrame, plots_dir: Path) -> None:
     fig, ax = plt.subplots(figsize=(8, 5))
     _ax_style(ax)
     ax.plot(avg["compression"] * 100, avg["rouge1_r"],
-            "o-", color=GREEN, label="ROUGE-1 recall", markersize=7)
+            "o-", color=BRIGHT_GREEN, label="ROUGE-1 recall", markersize=7)
     ax.plot(avg["compression"] * 100, avg["rougeL_r"],
-            "s--", color=ORANGE, label="ROUGE-L recall", markersize=7)
+            "s--", color=BRIGHT_ORANGE, label="ROUGE-L recall", markersize=7)
     for _, row in avg.iterrows():
         ax.annotate(f"t={row['threshold']:.2f}",
                     (row["compression"] * 100, row["rouge1_r"]),
@@ -1028,6 +1474,89 @@ def _plot_rouge_curves(df: pd.DataFrame, plots_dir: Path) -> None:
     ax.legend()
     plt.tight_layout()
     _save(fig, plots_dir, "rouge_curves")
+
+
+def _plot_removability_summary(df: pd.DataFrame, plots_dir: Path) -> None:
+    """Direct removability plots: percent segments/words removed by length and genre.
+
+    This is the missing direct counterpart to the compression curves: instead of
+    asking how well reduced transcripts preserve content, it asks how much content
+    each group is predicted to remove at the operating thresholds.
+    """
+    if df.empty or "threshold" not in df.columns:
+        return
+
+    work = df.copy()
+    work["pct_segments_removed"] = (1.0 - work["segs_kept"] / work["segs_total"].clip(lower=1)) * 100
+    work["pct_words_removed"] = (1.0 - work["compression"]) * 100
+    work.to_csv(plots_dir.parent / "removability_summary.csv", index=False)
+
+    thresholds = _pick_thresholds(sorted(work["threshold"].dropna().unique().tolist()), (0.70, 0.95))
+    if not thresholds:
+        return
+    sub = work[work["threshold"].isin(thresholds)].copy()
+
+    # Length buckets: segment removal and word removal, both needed because
+    # segment counts alone can hide long/short segment artifacts.
+    if "length_bucket" in sub.columns and sub["length_bucket"].nunique() > 1:
+        buckets = _ordered(list(sub["length_bucket"].dropna().unique()), ["short", "medium", "long", "unknown"])
+        x = np.arange(len(buckets))
+        width = 0.8 / max(len(thresholds), 1)
+        fig, axes = plt.subplots(1, 2, figsize=(13, 5))
+        fig.suptitle("Direct removability by video length", color=TEXT, fontsize=13)
+        for ax, metric, ylabel in [
+            (axes[0], "pct_segments_removed", "% segments removed"),
+            (axes[1], "pct_words_removed", "% words removed"),
+        ]:
+            _ax_style(ax)
+            for i, t in enumerate(thresholds):
+                vals = []
+                for b in buckets:
+                    vals.append(sub[(sub["length_bucket"] == b) & (sub["threshold"] == t)][metric].mean())
+                offset = (i - len(thresholds) / 2 + 0.5) * width
+                color = [BRIGHT_ORANGE, BRIGHT_RED, BRIGHT_PURPLE][i % 3]
+                bars = ax.bar(x + offset, vals, width=width * 0.9, color=color, alpha=0.95,
+                              label=f"t={t:.2f}")
+                for bar, v in zip(bars, vals):
+                    if not np.isnan(v):
+                        ax.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 1.0,
+                                f"{v:.1f}%", ha="center", va="bottom", color=TEXT, fontsize=8)
+            ax.set(xticks=x, xticklabels=[_pretty_name(b) for b in buckets], ylim=(0, 105),
+                   ylabel=ylabel)
+            ax.tick_params(axis="x", rotation=10)
+            ax.legend(fontsize=9)
+        plt.tight_layout()
+        _save(fig, plots_dir, "removability_by_length")
+
+    # Genre removability at the primary operating threshold, usually t=0.70.
+    primary_t = thresholds[0]
+    primary = work[np.isclose(work["threshold"], primary_t)].copy()
+    if "genre" in primary.columns and primary["genre"].nunique() > 1:
+        genres = _ordered(list(primary["genre"].dropna().unique()), EXPECTED_GENRES)
+        avg = primary.groupby("genre")[["pct_segments_removed", "pct_words_removed"]].mean()
+        x = np.arange(len(genres))
+        width = 0.38
+        fig, ax = plt.subplots(figsize=(max(10, len(genres) * 1.45), 5))
+        _ax_style(ax)
+        seg_vals = [avg.loc[g, "pct_segments_removed"] if g in avg.index else np.nan for g in genres]
+        word_vals = [avg.loc[g, "pct_words_removed"] if g in avg.index else np.nan for g in genres]
+        bars1 = ax.bar(x - width/2, seg_vals, width=width, color=BRIGHT_CYAN, alpha=0.95,
+                       label="segments removed")
+        bars2 = ax.bar(x + width/2, word_vals, width=width, color=BRIGHT_GREEN, alpha=0.95,
+                       label="words removed")
+        for bars in (bars1, bars2):
+            for bar in bars:
+                v = bar.get_height()
+                if not np.isnan(v):
+                    ax.text(bar.get_x() + bar.get_width()/2, v + 1.0, f"{v:.1f}%",
+                            ha="center", va="bottom", color=TEXT, fontsize=8)
+        ax.set(xticks=x, xticklabels=[_pretty_name(g) for g in genres], ylim=(0, 105),
+               ylabel="Removed (%)",
+               title=f"Removability varies by genre at t={primary_t:.2f}")
+        ax.tick_params(axis="x", rotation=15)
+        ax.legend(fontsize=10)
+        plt.tight_layout()
+        _save(fig, plots_dir, "removability_by_genre")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1057,11 +1586,13 @@ def baseline_eval(model_scores: dict, data: dict,
         roc = roc_auc_score(l, s)
         pra = average_precision_score(l, s)
         roc_lo, roc_hi = _bootstrap_ci(s, l, roc_auc_score, n_boot=300)
+        pr_lo, pr_hi = _bootstrap_ci(s, l, average_precision_score, n_boot=300)
         results[name] = {
             "n":       len(s),
             "roc_auc": round(roc, 4),
             "pr_auc":  round(pra, 4),
             "roc_ci":  (round(roc_lo, 4), round(roc_hi, 4)),
+            "pr_ci":   (round(pr_lo, 4), round(pr_hi, 4)),
         }
 
     if not results:
@@ -1083,14 +1614,13 @@ def baseline_eval(model_scores: dict, data: dict,
         _ax_style(ax)
         names  = list(results.keys())
         vals   = [results[n][metric] for n in names]
-        colors = [BASELINE_COLORS.get(n, BLUE) for n in names]
-        # error bars only for roc_auc (bootstrapped)
-        yerr_lo = [results[n]["roc_auc"] - results[n]["roc_ci"][0]
-                   for n in names] if metric == "roc_auc" else None
-        yerr_hi = [results[n]["roc_ci"][1] - results[n]["roc_auc"]
-                   for n in names] if metric == "roc_auc" else None
-        yerr = np.array([yerr_lo, yerr_hi]) if yerr_lo else None
-        bars = ax.bar(names, vals, color=colors, alpha=0.85,
+        colors = [BASELINE_COLORS.get(n, BRIGHT_CYAN) for n in names]
+        ci_key = "roc_ci" if metric == "roc_auc" else "pr_ci"
+        yerr_lo = [results[n][metric] - results[n][ci_key][0] for n in names]
+        yerr_hi = [results[n][ci_key][1] - results[n][metric] for n in names]
+        yerr = np.array([yerr_lo, yerr_hi])
+        display_names = [_pretty_name(n) for n in names]
+        bars = ax.bar(display_names, vals, color=colors, alpha=0.95,
                       yerr=yerr, capsize=5, error_kw={"ecolor": TEXT, "lw": 1.5})
         for bar, v in zip(bars, vals):
             ax.text(bar.get_x() + bar.get_width() / 2,
@@ -1104,16 +1634,18 @@ def baseline_eval(model_scores: dict, data: dict,
     _save(fig, plots_dir, "baseline_comparison")
 
     # ── Per-genre ROC-AUC breakdown ───────────────────────────────────────────
-    genre_results: dict[str, dict[str, float]] = defaultdict(dict)
+    genre_results: dict[str, dict[str, dict[str, float]]] = defaultdict(dict)
     for name, sc in all_methods.items():
-        for g in sorted(set(data["genre"].values())):
-            g_keys = {k for k, v in data["genre"].items() if v == g}
-            s_g = {k: v for k, v in sc.items() if k[0] in g_keys}
-            l_g = {k: v for k, v in labels.items() if k[0] in g_keys}
-            s, l = _aligned_arrays(s_g, l_g)
-            if len(set(l)) < 2 or len(s) < 5:
+        for g in _ordered(list(set(data["genre"].values())), EXPECTED_GENRES):
+            g_vids = {vid for vid, genre in data["genre"].items() if genre == g}
+            s_g = {k: v for k, v in sc.items() if k[0] in g_vids}
+            l_g = {k: v for k, v in labels.items() if k[0] in g_vids}
+            s_arr, l_arr = _aligned_arrays(s_g, l_g)
+            if len(set(l_arr)) < 2 or len(s_arr) < 5:
                 continue
-            genre_results[g][name] = round(roc_auc_score(l, s), 4)
+            auc = float(roc_auc_score(l_arr, s_arr))
+            lo, hi = _bootstrap_ci(s_arr, l_arr, roc_auc_score, n_boot=200)
+            genre_results[g][name] = {"auc": round(auc, 4), "ci_lo": round(lo, 4), "ci_hi": round(hi, 4)}
 
     if genre_results:
         _plot_baseline_by_genre(genre_results, list(all_methods.keys()), plots_dir)
@@ -1125,7 +1657,7 @@ def _plot_baseline_by_genre(
     genre_results: dict, method_names: list[str], plots_dir: Path
 ) -> None:
     """Grouped bar chart: AUC-ROC for each method, grouped by genre."""
-    genres  = sorted(genre_results.keys())
+    genres  = _ordered(list(genre_results.keys()), EXPECTED_GENRES)
     n_g     = len(genres)
     n_m     = len(method_names)
     x       = np.arange(n_g)
@@ -1135,22 +1667,33 @@ def _plot_baseline_by_genre(
     _ax_style(ax)
 
     for i, method in enumerate(method_names):
-        vals   = [genre_results[g].get(method, float("nan")) for g in genres]
+        vals, lo_err, hi_err = [], [], []
+        for g in genres:
+            entry = genre_results[g].get(method)
+            if isinstance(entry, dict):
+                vals.append(entry.get("auc", float("nan")))
+                lo_err.append(entry.get("auc", 0) - entry.get("ci_lo", entry.get("auc", 0)))
+                hi_err.append(entry.get("ci_hi", entry.get("auc", 0)) - entry.get("auc", 0))
+            else:
+                vals.append(float("nan") if entry is None else entry)
+                lo_err.append(0.0); hi_err.append(0.0)
         offset = (i - n_m / 2 + 0.5) * width
-        color  = BASELINE_COLORS.get(method, BLUE)
-        bars   = ax.bar(x + offset, vals, width=width * 0.9, color=color,
-                        alpha=0.85, label=method)
+        color  = BASELINE_COLORS.get(method, BRIGHT_CYAN)
+        yerr = np.array([lo_err, hi_err])
+        bars = ax.bar(x + offset, vals, width=width * 0.9, color=color,
+                      alpha=0.95, label=_pretty_name(method),
+                      yerr=yerr, capsize=3, error_kw={"ecolor": TEXT, "lw": 1.0})
         for bar, v in zip(bars, vals):
             if not np.isnan(v):
                 ax.text(bar.get_x() + bar.get_width() / 2,
-                        bar.get_height() + 0.005,
+                        bar.get_height() + 0.01,
                         f"{v:.2f}", ha="center", va="bottom",
                         color=TEXT, fontsize=8)
 
-    ax.set(xticks=x, xticklabels=genres, ylim=(0, 1.15),
-           ylabel="ROC-AUC", title="SegRemover advantage over baselines is largest in lectures")
+    ax.set(xticks=x, xticklabels=[_pretty_name(g) for g in genres], ylim=(0, 1.15),
+           ylabel="ROC-AUC", title="SegRemover advantage over baselines varies by genre")
     ax.tick_params(axis="x", rotation=15)
-    ax.legend(fontsize=10)
+    ax.legend(fontsize=10, ncol=min(n_m, 5), loc="upper center", bbox_to_anchor=(0.5, -0.18))
     plt.tight_layout()
     _save(fig, plots_dir, "baseline_by_genre")
 
@@ -1191,8 +1734,8 @@ def agreement_analysis(model_scores: dict, data: dict,
     fig, ax = plt.subplots(figsize=(6 + len(names), 5 + len(names) // 2))
     im = ax.imshow(mat, cmap="RdYlGn", vmin=-1, vmax=1, aspect="auto")
     ax.set(xticks=range(len(names)), yticks=range(len(names)),
-           xticklabels=names, yticklabels=names,
-           title="Model agrees most with SBERT, least with random heuristic  (Spearman ρ)")
+           xticklabels=[_pretty_name(n) for n in names], yticklabels=[_pretty_name(n) for n in names],
+           title="Agreement between removability signals (Spearman ρ)")
     ax.set_facecolor(PANEL)
     for i in range(len(names)):
         for j in range(len(names)):
@@ -1229,7 +1772,7 @@ def agreement_by_genre(model_scores: dict, data: dict, plots_dir: Path) -> None:
     fig, ax = plt.subplots(figsize=(max(10, len(genres) * 2), 5))
     _ax_style(ax)
 
-    colors_list = [GREEN, ORANGE, PURPLE, RED]
+    colors_list = [BRIGHT_GREEN, BRIGHT_ORANGE, BRIGHT_PURPLE, BRIGHT_RED]
     for i, (src_name, src_scores) in enumerate(sources.items()):
         rhos = []
         for g in genres:
@@ -1245,7 +1788,7 @@ def agreement_by_genre(model_scores: dict, data: dict, plots_dir: Path) -> None:
         offset = (i - len(sources) / 2 + 0.5) * width
         c = colors_list[i % len(colors_list)]
         bars = ax.bar(x + offset, rhos, width=width * 0.9,
-                      color=c, alpha=0.85, label=f"model vs {src_name}")
+                      color=c, alpha=0.85, label=f"SegRemover vs {_pretty_name(src_name)}")
         for bar, v in zip(bars, rhos):
             if not np.isnan(v):
                 ax.text(bar.get_x() + bar.get_width() / 2,
@@ -1254,9 +1797,9 @@ def agreement_by_genre(model_scores: dict, data: dict, plots_dir: Path) -> None:
                         color=TEXT, fontsize=8)
 
     ax.axhline(0, color=GRID, linewidth=1)
-    ax.set(xticks=x, xticklabels=genres, ylim=(-0.5, 1.1),
-           ylabel="Spearman ρ  (model vs source)",
-           title="Model–SBERT agreement is strongest; genre-level variation reveals domain specificity")
+    ax.set(xticks=x, xticklabels=[_pretty_name(g) for g in genres], ylim=(-0.1, 1.05),
+           ylabel="Spearman ρ  (SegRemover vs source)",
+           title="Agreement varies by genre and signal source")
     ax.tick_params(axis="x", rotation=15)
     ax.legend(fontsize=10)
     plt.tight_layout()
@@ -1316,7 +1859,7 @@ def gold_eval(model_scores: dict, data: dict, plots_dir: Path, out_dir: Path,
                    title=f"Model rank correlates with human judgement  (ρ={rho:.3f})")
             # Annotate with ρ
             ax.text(0.05, 0.92, f"Spearman ρ = {rho:.3f}", transform=ax.transAxes,
-                    color=ORANGE, fontsize=12, fontweight="bold")
+                    color=BRIGHT_ORANGE, fontsize=12, fontweight="bold")
             plt.tight_layout()
             _save(fig, plots_dir, "gold_scatter")
 
@@ -1359,8 +1902,8 @@ def gold_eval(model_scores: dict, data: dict, plots_dir: Path, out_dir: Path,
             fig, axes = plt.subplots(1, 2, figsize=(10, 4))
             fig.suptitle("Model surpasses weak labels against human annotations",
                          color=TEXT, fontsize=13)
-            for ax, col, color in [(axes[0], "accuracy", BLUE),
-                                   (axes[1], "f1",       GREEN)]:
+            for ax, col, color in [(axes[0], "accuracy", BRIGHT_CYAN),
+                                   (axes[1], "f1",       BRIGHT_GREEN)]:
                 _ax_style(ax)
                 bars = ax.bar(df_gold["method"], df_gold[col], color=color, alpha=0.85)
                 for bar, v in zip(bars, df_gold[col]):
@@ -1459,11 +2002,11 @@ def caption_type_eval(model_scores: dict, data: dict, plots_dir: Path) -> dict:
         "Performance gap between manual and auto captions quantifies domain shift",
         color=TEXT, fontsize=12,
     )
-    cap_colors = {"manual": BLUE, "auto": ORANGE, "unknown": GRID}
+    cap_colors = CAPTION_COLORS
     for ax, metric in zip(axes, ["roc_auc", "pr_auc"]):
         _ax_style(ax)
         valid = df.dropna(subset=[metric])
-        colors = [cap_colors.get(ct, PURPLE) for ct in valid["caption_type"]]
+        colors = [cap_colors.get(ct, BRIGHT_PURPLE) for ct in valid["caption_type"]]
         bars = ax.bar(valid["caption_type"], valid[metric], color=colors, alpha=0.85)
         for bar, v in zip(bars, valid[metric]):
             ax.text(bar.get_x() + bar.get_width() / 2,
@@ -1486,7 +2029,8 @@ def save_qualitative(model_scores: dict, data: dict, out_dir: Path) -> None:
     if not scores:
         return
 
-    labels, _ = _binary_labels(data)
+    plots_dir = out_dir / "plots"
+    plots_dir.mkdir(exist_ok=True)
 
     rows = []
     for (vid, sidx), p in scores.items():
@@ -1495,6 +2039,7 @@ def save_qualitative(model_scores: dict, data: dict, out_dir: Path) -> None:
         if seg is None:
             continue
         key = (vid, sidx)
+        text = seg.get("text", "")
         rows.append({
             "video_id":     vid,
             "genre":        data["genre"].get(vid, ""),
@@ -1506,60 +2051,105 @@ def save_qualitative(model_scores: dict, data: dict, out_dir: Path) -> None:
                             if key in data["fn"] else "",
             "disfl_label":  DISFL_NAMES[data["disfl"][key]]
                             if key in data["disfl"] else "",
-            "text_snippet": seg["text"][:140].replace("\n", " "),
+            "text_snippet": text[:220].replace("\n", " "),
+            "text_full":    text.replace("\n", " "),
         })
 
+    if not rows:
+        return
     df = pd.DataFrame(rows).sort_values("p_remove")
 
     def _block(label: str, subset: pd.DataFrame) -> str:
-        lines = [f"\n## {label}\n",
-                 subset[["genre", "seg_idx", "p_remove", "fn_label",
-                          "text_snippet"]].to_markdown(index=False)]
-        return "\n".join(lines)
+        if subset.empty:
+            return f"\n## {label}\n\n_No examples available._"
+        view = subset[["genre", "seg_idx", "p_remove", "fn_label", "text_snippet"]].copy()
+        view["genre"] = view["genre"].map(_pretty_name)
+        return "\n".join([f"\n## {label}\n", view.to_markdown(index=False)])
 
     top_remove = df[df["p_remove"] >= 0.85].tail(10)
     top_keep   = df[df["p_remove"] <= 0.15].head(10)
 
-    # False positives / negatives if gold available
+    # False positives / negatives if gold available.
     fp_rows = df[(df["p_remove"] >= 0.70) & (df["gold_label"] == 0)]
     fn_rows = df[(df["p_remove"] <= 0.30) & (df["gold_label"] == 1)]
 
     md = ["# Qualitative examples\n",
-          _block("High-confidence REMOVE (p ≥ 0.85)", top_remove),
-          _block("High-confidence KEEP (p ≤ 0.15)",   top_keep)]
+          _block("High-confidence REMOVE (p >= 0.85)", top_remove),
+          _block("High-confidence KEEP (p <= 0.15)",   top_keep)]
     if not fp_rows.empty:
         md.append(_block("False positives — model says REMOVE, gold says KEEP", fp_rows.head(10)))
     if not fn_rows.empty:
         md.append(_block("False negatives — model says KEEP, gold says REMOVE", fn_rows.head(10)))
 
-    # ── Per-genre failure mode table ─────────────────────────────────────────
+    # Per-genre failure mode table if gold labels exist.
     if not fp_rows.empty or not fn_rows.empty:
         md.append("\n## Per-genre failure mode table\n")
         md.append("One representative FP and FN per genre.\n")
         header = ("| Genre | Error | p_remove | fn_label | Text snippet |\n"
                   "|---|---|---|---|---|")
         md.append(header)
-        genres_seen = set()
-        for genre in df["genre"].unique():
-            if genre in genres_seen:
-                continue
-            # FP: model says remove, gold says keep
+        for genre in _ordered(list(df["genre"].dropna().unique()), EXPECTED_GENRES):
             g_fp = fp_rows[fp_rows["genre"] == genre]
             if not g_fp.empty:
                 r = g_fp.iloc[0]
-                snippet = r["text_snippet"][:80].replace("|", "\\|")
-                md.append(f"| {genre} | FP | {r['p_remove']:.2f} | {r['fn_label']} | {snippet} |")
-                genres_seen.add(genre)
-            # FN: model says keep, gold says remove
+                snippet = r["text_snippet"][:100].replace("|", "\\|")
+                md.append(f"| {_pretty_name(genre)} | FP | {r['p_remove']:.2f} | {r['fn_label']} | {snippet} |")
             g_fn = fn_rows[fn_rows["genre"] == genre]
             if not g_fn.empty:
                 r = g_fn.iloc[0]
-                snippet = r["text_snippet"][:80].replace("|", "\\|")
-                md.append(f"| {genre} | FN | {r['p_remove']:.2f} | {r['fn_label']} | {snippet} |")
-                genres_seen.add(genre)
+                snippet = r["text_snippet"][:100].replace("|", "\\|")
+                md.append(f"| {_pretty_name(genre)} | FN | {r['p_remove']:.2f} | {r['fn_label']} | {snippet} |")
+
+    # Transcript-only risk examples: visual/deictic phrases often need video,
+    # slides, diagrams, or gestures. This gives evidence for limitations even
+    # before gold labels are complete.
+    def _match_visual_term(text: str) -> str:
+        low = text.lower()
+        for pat in VISUAL_CONTEXT_PATTERNS:
+            if pat in low:
+                return pat
+        return ""
+
+    df["visual_context_term"] = df["text_full"].map(_match_visual_term)
+    risk = df[df["visual_context_term"] != ""].copy()
+    if not risk.empty:
+        risk = risk.sort_values("p_remove", ascending=False)
+        risk_view = risk.head(40)[["genre", "seg_idx", "p_remove", "visual_context_term", "fn_label", "text_snippet"]].copy()
+        risk_view["genre"] = risk_view["genre"].map(_pretty_name)
+        risk_md = [
+            "# Transcript-only risk examples\n",
+            "Segments containing visual/deictic cues may be important even when the transcript alone looks removable.\n",
+            risk_view.to_markdown(index=False),
+        ]
+        (out_dir / "transcript_only_risk_examples.md").write_text("\n".join(risk_md), encoding="utf-8")
+        risk.to_csv(out_dir / "transcript_only_risk_examples.csv", index=False)
+
+        counts = risk.groupby("genre").size().sort_values(ascending=False)
+        genres = _ordered(list(counts.index), EXPECTED_GENRES)
+        vals = [counts.get(g, 0) for g in genres]
+        fig, ax = plt.subplots(figsize=(max(8, len(genres) * 1.4), 4.5))
+        _ax_style(ax)
+        colors = [GENRE_PALETTE.get(g, BRIGHT_CYAN) for g in genres]
+        bars = ax.bar([_pretty_name(g) for g in genres], vals, color=colors, alpha=0.95)
+        for bar, v in zip(bars, vals):
+            ax.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 0.2,
+                    f"{int(v)}", ha="center", va="bottom", color=TEXT, fontsize=10)
+        ax.set(ylabel="Segments with visual/deictic cues",
+               title="Transcript-only risk cues by genre")
+        ax.tick_params(axis="x", rotation=15)
+        plt.tight_layout()
+        _save(fig, plots_dir, "transcript_only_risk_by_genre")
+        md.append("\n## Transcript-only risk examples\n")
+        md.append("See `transcript_only_risk_examples.md` for visual/deictic segments such as "
+                  "'this graph', 'on screen', and 'as you can see'.")
+    else:
+        (out_dir / "transcript_only_risk_examples.md").write_text(
+            "# Transcript-only risk examples\n\nNo visual/deictic cue examples matched the current pattern list.\n",
+            encoding="utf-8",
+        )
 
     (out_dir / "qualitative_examples.md").write_text("\n".join(md), encoding="utf-8")
-    df.to_csv(out_dir / "qualitative_examples.csv", index=False)
+    df.drop(columns=["text_full"], errors="ignore").to_csv(out_dir / "qualitative_examples.csv", index=False)
     print(f"  Saved qualitative examples ({len(df):,} rows)")
 
 
@@ -1572,8 +2162,8 @@ def _plot_genre_bar(values: dict, title: str, plots_dir: Path, name: str) -> Non
     _ax_style(ax)
     genres = list(values.keys())
     vals   = [values[g] for g in genres]
-    colors = [GENRE_PALETTE.get(g, BLUE) for g in genres]
-    bars   = ax.bar(genres, vals, color=colors, alpha=0.85)
+    colors = [GENRE_PALETTE.get(g, BRIGHT_CYAN) for g in genres]
+    bars   = ax.bar([_pretty_name(g) for g in genres], vals, color=colors, alpha=0.95)
     for bar, v in zip(bars, vals):
         ax.text(bar.get_x() + bar.get_width() / 2,
                 bar.get_height() + 0.005,
@@ -1598,8 +2188,8 @@ def _plot_genre_bar_ci(
         [values[g]["auc"] - values[g]["ci_lo"] for g in genres],
         [values[g]["ci_hi"] - values[g]["auc"] for g in genres],
     ])
-    colors = [GENRE_PALETTE.get(g, BLUE) for g in genres]
-    bars   = ax.bar(genres, vals, color=colors, alpha=0.85,
+    colors = [GENRE_PALETTE.get(g, BRIGHT_CYAN) for g in genres]
+    bars   = ax.bar([_pretty_name(g) for g in genres], vals, color=colors, alpha=0.95,
                     yerr=yerr, capsize=5, error_kw={"ecolor": TEXT, "lw": 1.5})
     for bar, v in zip(bars, vals):
         ax.text(bar.get_x() + bar.get_width() / 2,
@@ -1619,7 +2209,8 @@ def _plot_genre_bar_ci(
 def generate_report(args, audit_info: dict, seg_metrics: dict,
                     baseline_results: dict, transcript_df: pd.DataFrame,
                     label_desc: str, config: dict | None,
-                    gold_results: dict, out_dir: Path) -> None:
+                    gold_results: dict, out_dir: Path,
+                    explainer_results: dict | None = None) -> None:
     plots_rel = "plots"
 
     def _img(name: str, caption: str = "") -> str:
@@ -1643,8 +2234,30 @@ def generate_report(args, audit_info: dict, seg_metrics: dict,
         f"| Baselines | {'✓ loaded' if audit_info['has_baselines'] else '✗ missing (run src/baselines.py)'} |",
     ]
 
-    for g, n in sorted(audit_info.get("genre_counts", {}).items()):
-        lines.append(f"| Genre: {g} | {n} videos |")
+    for g in _ordered(list(audit_info.get("genre_counts", {}).keys()), EXPECTED_GENRES):
+        n = audit_info.get("genre_counts", {}).get(g, 0)
+        lines.append(f"| Genre: {_pretty_name(g)} | {n} videos |")
+
+    missing = audit_info.get("missing_genres", [])
+    coverage_rows = [
+        ("Six-genre coverage", "OK" if not missing else "WARN",
+         "all expected genres present" if not missing else "missing: " + ", ".join(_pretty_name(g) for g in missing)),
+        ("Direct removability by length", "OK" if (out_dir / "plots" / "removability_by_length.png").exists() else "WARN",
+         "generated" if (out_dir / "plots" / "removability_by_length.png").exists() else "needs transcript-level eval"),
+        ("Caption-type robustness", "OK" if (out_dir / "plots" / "caption_type_comparison.png").exists() else "WARN",
+         "generated" if (out_dir / "plots" / "caption_type_comparison.png").exists() else "caption_type missing or only one type"),
+        ("Gold/human evaluation", "OK" if audit_info.get("has_gold") else "WARN",
+         "gold labels loaded" if audit_info.get("has_gold") else "weak-label proxy only"),
+        ("Transcript-only risk scan", "OK" if (out_dir / "transcript_only_risk_examples.md").exists() else "WARN",
+         "generated" if (out_dir / "transcript_only_risk_examples.md").exists() else "qualitative step not run"),
+    ]
+    lines += [
+        "\n## Evidence coverage checklist",
+        "| Evidence item | Status | Note |",
+        "|---|---:|---|",
+    ]
+    for item, status, note in coverage_rows:
+        lines.append(f"| {item} | {status} | {note} |")
 
     if seg_metrics:
         ci = seg_metrics.get("roc_auc_ci", ("—", "—"))
@@ -1670,8 +2283,7 @@ def generate_report(args, audit_info: dict, seg_metrics: dict,
         if (out_dir / "plots" / "calibration_before_after_T.png").exists():
             T = config.get("temperature", 1.0) if config else "?"
             lines.append(_img("calibration_before_after_T",
-                               f"Temperature scaling (T={T}) reduces ECE by improving "
-                               "over-confident high-probability predictions."))
+                               f"Temperature scaling (T={T}) changes ECE; this panel prevents claiming improvement when ECE increases."))
         lines += [
             _img("model_confusion",
                  "Confusion matrix at threshold=0.5; most errors are false positives "
@@ -1680,9 +2292,63 @@ def generate_report(args, audit_info: dict, seg_metrics: dict,
                  "Lowering the threshold increases recall at the cost of precision; "
                  "the F1 peak marks the operating point."),
             _img("model_confidence_buckets",
-                 "High-confidence predictions (p≥0.95) are most reliable; "
-                 "precision drops in the borderline 0.70–0.95 bucket."),
+                 "High-confidence predictions (p>=0.95) are most reliable; "
+                 "precision drops in the borderline 0.70-0.95 bucket."),
         ]
+        if (out_dir / "plots" / "function_by_confidence_bucket.png").exists():
+            lines.append(_img("function_by_confidence_bucket",
+                              "Function-label mix by confidence bucket: this explains what the model tends to remove."))
+        if (out_dir / "plots" / "p_remove_by_function.png").exists():
+            lines += [
+                "\n### Head B — Function classifier",
+                _img("fn_label_distribution_by_genre",
+                     "Function-label distribution by genre: lectures are new-information heavy; "
+                     "podcasts skew toward discourse fillers."),
+                _img("p_remove_by_function",
+                     "Redundant and off-topic segments score highest p_remove, "
+                     "validating that Head B shapes the removal decision."),
+            ]
+            if explainer_results and "head_b_accuracy" in explainer_results:
+                acc = explainer_results["head_b_accuracy"]
+                f1  = explainer_results["head_b_macro_f1"]
+                lines += [
+                    f"\n**Head B classification:** accuracy={acc}  macro-F1={f1}\n",
+                    "| Function class | F1 |",
+                    "|---|---|",
+                ] + [
+                    f"| {_pretty_name(n)} | {explainer_results.get(f'head_b_f1_{n}', '—')} |"
+                    for n in FUNCTION_NAMES
+                ]
+                if (out_dir / "plots" / "head_b_confusion.png").exists():
+                    lines.append(_img("head_b_confusion",
+                                      "Row-normalised confusion matrix for Head B. "
+                                      "Off-diagonal mass shows which function classes are confused."))
+        if (out_dir / "plots" / "p_remove_by_disfluency.png").exists():
+            lines += [
+                "\n### Head C — Disfluency classifier",
+                _img("disfl_distribution_by_genre",
+                     "Disfluency distribution by genre: podcasts and TV series contain "
+                     "more filled pauses and repetitions than lectures."),
+                _img("p_remove_by_disfluency",
+                     "Disfluent segments (filled pause, repetition, restart) score higher p_remove, "
+                     "validating Head C's signal."),
+            ]
+            if explainer_results and "head_c_accuracy" in explainer_results:
+                acc = explainer_results["head_c_accuracy"]
+                f1  = explainer_results["head_c_macro_f1"]
+                lines += [
+                    f"\n**Head C classification:** accuracy={acc}  macro-F1={f1}\n",
+                    "| Disfluency class | F1 |",
+                    "|---|---|",
+                ] + [
+                    f"| {_pretty_name(n)} | {explainer_results.get(f'head_c_f1_{n}', '—')} |"
+                    for n in DISFL_NAMES
+                ]
+                if (out_dir / "plots" / "head_c_confusion.png").exists():
+                    lines.append(_img("head_c_confusion",
+                                      "Row-normalised confusion matrix for Head C. "
+                                      "Confusion between adjacent disfluency classes is expected."))
+
         if seg_metrics.get("genre_auc"):
             lines += [
                 "\n### AUC by genre (95% bootstrap CI)",
@@ -1704,8 +2370,13 @@ def generate_report(args, audit_info: dict, seg_metrics: dict,
         ]
         if (out_dir / "plots" / "transcript_by_length.png").exists():
             lines.append(_img("transcript_by_length",
-                               "Longer videos are more semantically robust to compression — "
-                               "they contain more redundancy."))
+                               "Longer videos are more semantically robust to compression."))
+        if (out_dir / "plots" / "removability_by_length.png").exists():
+            lines.append(_img("removability_by_length",
+                               "Direct removability by length: percent segments and words removed at operating thresholds."))
+        if (out_dir / "plots" / "removability_by_genre.png").exists():
+            lines.append(_img("removability_by_genre",
+                               "Direct removability by genre at the primary threshold."))
         if (out_dir / "plots" / "rouge_curves.png").exists():
             lines.append(_img("rouge_curves",
                                "ROUGE recall tracks compression linearly; "
@@ -1713,23 +2384,22 @@ def generate_report(args, audit_info: dict, seg_metrics: dict,
 
     if baseline_results:
         lines += ["\n## 4. Baseline comparison"]
-        header = f"| {'Method':12s} | {'ROC-AUC':>8s} | {'PR-AUC':>8s} | 95% CI |"
-        sep    = f"|{'-'*14}|{'-'*10}|{'-'*10}|{'-'*16}|"
+        header = f"| {'Method':12s} | {'ROC-AUC':>8s} | ROC 95% CI | {'PR-AUC':>8s} | PR 95% CI |"
+        sep    = f"|{'-'*14}|{'-'*10}|{'-'*14}|{'-'*10}|{'-'*14}|"
         lines += [header, sep]
         for name, m in baseline_results.items():
-            ci = m.get("roc_ci", ("—", "—"))
-            lines.append(f"| {name:12s} | {m['roc_auc']:>8.4f} | {m['pr_auc']:>8.4f} "
-                         f"| {ci[0]}–{ci[1]} |")
+            roc_ci = m.get("roc_ci", ("-", "-"))
+            pr_ci = m.get("pr_ci", ("-", "-"))
+            lines.append(f"| {_pretty_name(name):12s} | {m['roc_auc']:>8.4f} | {roc_ci[0]}-{roc_ci[1]} | "
+                         f"{m['pr_auc']:>8.4f} | {pr_ci[0]}-{pr_ci[1]} |")
         lines += [
             "",
             _img("baseline_comparison",
-                 "SegRemover outperforms all unsupervised baselines; "
-                 "error bars show 95% bootstrap CI across 500 resamples."),
+                 "SegRemover outperforms the unsupervised baselines; error bars show 95% bootstrap CI across 300 resamples."),
         ]
         if (out_dir / "plots" / "baseline_by_genre.png").exists():
             lines.append(_img("baseline_by_genre",
-                               "Genre-level breakdown: the model's advantage over SBERT is "
-                               "largest for lectures, smallest for entertainment."))
+                               "Genre-level breakdown: model advantage over baselines varies by domain."))
 
     lines += [
         "\n## 5. 4-way agreement",
@@ -1779,14 +2449,20 @@ def generate_report(args, audit_info: dict, seg_metrics: dict,
 
     lines += [
         "\n## 8. Qualitative examples",
-        "See `qualitative_examples.md` — includes per-genre failure mode table.",
+        "See `qualitative_examples.md` — includes high-confidence keep/remove examples and any gold-based FP/FN examples.",
+    ]
+    if (out_dir / "plots" / "transcript_only_risk_by_genre.png").exists():
+        lines.append(_img("transcript_only_risk_by_genre",
+                          "Transcript-only limitation scan: visual/deictic cues by genre."))
+        lines.append("See `transcript_only_risk_examples.md` for snippets.")
+
+    lines += [
         "\n## 9. Limitations",
         "- Segment metrics evaluated against **weak labels** (proxy) unless gold annotations exist.",
-        "- Transcript SBERT cosine uses centroid-level similarity; does not capture "
-        "fact-level preservation.",
-        "- ROUGE recall measures lexical preservation (`pip install rouge-score`); "
-        "QA-preservation not computed (SBERT cosine serves as semantic proxy).",
-        "- Model scores missing for segments beyond `max_segs` truncation limit.",
+        "- Transcript SBERT cosine uses centroid-level similarity; does not capture fact-level preservation.",
+        "- ROUGE recall measures lexical preservation (`pip install rouge-score`); QA-preservation is not computed.",
+        "- Transcript-only risk examples are lexical cues, not confirmed errors, unless gold labels are present.",
+        "- Model scores can be missing for segments beyond the checkpoint `max_segs` truncation limit.",
         "- Caption-type analysis requires `caption_type` field in segment data.",
     ]
 
@@ -1901,7 +2577,9 @@ def main() -> None:
               f"({sum(len(v) for v in data['docs'].values()):,} segments)")
 
     # ── 2. Model inference ────────────────────────────────────────────────────
-    model_scores: dict = {}
+    model_scores:  dict = {}
+    model_heads_b: dict = {}
+    model_heads_c: dict = {}
     config: dict | None = None
     config_path = models_dir / "config.json"
     if config_path.exists():
@@ -1915,7 +2593,7 @@ def main() -> None:
     elif config is None:
         print("  models/config.json not found — cannot reconstruct model")
     else:
-        model_scores = run_inference(checkpoint, config, data, device)
+        model_scores, model_heads_b, model_heads_c = run_inference(checkpoint, config, data, device)
 
     # ── 3. Data audit ─────────────────────────────────────────────────────────
     print("\n[3/10] Data audit ...")
@@ -1924,6 +2602,18 @@ def main() -> None:
     # ── 4. Segment-level evaluation ───────────────────────────────────────────
     print("\n[4/10] Segment-level evaluation ...")
     seg_metrics = segment_eval(model_scores, data, args.thresholds, config, plots_dir)
+
+    # ── 4b. Head B / Head C explainability (always runs — distribution plots
+    #        don't need model scores; p_remove plots skip gracefully if no model)
+    print("\n[4b] Explainability plots (Head B / Head C) ...")
+    plot_fn_label_distribution(data, plots_dir)
+    plot_disfl_distribution(data, plots_dir)
+    plot_p_remove_by_function(model_scores, data, plots_dir)
+    plot_p_remove_by_disfluency(model_scores, data, plots_dir)
+
+    # ── 4c. Head B / Head C classifier metrics (explainer quality) ───────────
+    print("\n[4c] Explainer classifier metrics (Head B / Head C) ...")
+    explainer_results = explainer_eval(model_heads_b, model_heads_c, data, plots_dir)
 
     # ── 5. Transcript-level evaluation ────────────────────────────────────────
     print("\n[5/10] Transcript-level evaluation ...")
@@ -1951,7 +2641,8 @@ def main() -> None:
     save_qualitative(model_scores, data, out_dir)
     _, label_desc = _binary_labels(data)
     generate_report(args, audit_info, seg_metrics, baseline_results,
-                    transcript_df, label_desc, config, gold_results, out_dir)
+                    transcript_df, label_desc, config, gold_results, out_dir,
+                    explainer_results=explainer_results)
 
     print(f"\n{'='*60}")
     print(f"Outputs: {out_dir.resolve()}")

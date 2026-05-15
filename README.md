@@ -117,7 +117,7 @@ python src/train.py
 # 9. Evaluate (smoke test — CPU OK)
 python src/eval.py --max-docs 5 --no-model
 
-# 9. Evaluate (full — GPU required)
+# 10. Evaluate (full — GPU required)
 python src/eval.py --checkpoint models/best.pt
 
 # ── On HPC with Slurm ──────────────────────────────────────────────

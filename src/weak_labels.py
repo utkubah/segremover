@@ -48,7 +48,12 @@ EMBED_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
 
 # Function label class indices that map to REMOVE / KEEP for Head A
 FUNCTION_REMOVE_CLASSES = {2, 4, 5}   # redundant_repetition, discourse_filler, off_topic
-FUNCTION_KEEP_CLASSES   = {0, 1, 3}   # new_information, useful_repetition, clarification
+# Split into per-class keep LFs so Snorkel can learn independent accuracy weights.
+# Previously a single LF_function_keep meant LF_repetition always won the conflict on
+# useful_repetition segments because Snorkel had no way to distinguish the three keep classes.
+FUNCTION_NEW_INFO_CLASS    = 0
+FUNCTION_USEFUL_REP_CLASS  = 1
+FUNCTION_CLARIFICATION_CLASS = 3
 
 # Disfluency label class indices that map to REMOVE for Head A
 DISFLUENCY_REMOVE_CLASSES = {1, 2, 3, 4}  # filled_pause, repetition, revision, restart
@@ -255,7 +260,8 @@ def main() -> None:
     if use_summary_align:
         lf_names.append("LF_summary_align")
     if use_function:
-        lf_names += ["LF_function_remove", "LF_function_keep"]
+        lf_names += ["LF_function_remove", "LF_function_new_info",
+                     "LF_function_useful_rep", "LF_function_clarification"]
     if use_disfluency:
         lf_names.append("LF_disfluency_remove")
 
@@ -288,8 +294,10 @@ def main() -> None:
                 votes.append(summary_align.get((seg["video_id"], seg["seg_idx"]), ABSTAIN))
             if use_function:
                 fn_label = function_labels.get((seg["video_id"], seg["seg_idx"]), -99)
-                votes.append(REMOVE if fn_label in FUNCTION_REMOVE_CLASSES else ABSTAIN)
-                votes.append(KEEP   if fn_label in FUNCTION_KEEP_CLASSES   else ABSTAIN)
+                votes.append(REMOVE if fn_label in FUNCTION_REMOVE_CLASSES    else ABSTAIN)
+                votes.append(KEEP   if fn_label == FUNCTION_NEW_INFO_CLASS    else ABSTAIN)
+                votes.append(KEEP   if fn_label == FUNCTION_USEFUL_REP_CLASS  else ABSTAIN)
+                votes.append(KEEP   if fn_label == FUNCTION_CLARIFICATION_CLASS else ABSTAIN)
             if use_disfluency:
                 ds_label = disfluency_labels.get((seg["video_id"], seg["seg_idx"]), -99)
                 votes.append(REMOVE if ds_label in DISFLUENCY_REMOVE_CLASSES else ABSTAIN)

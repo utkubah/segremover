@@ -3,6 +3,20 @@
 
 # Data (large, not for version control)
 data/
+!data/gold/
+!data/gold/videos/
+!data/gold/videos/.gitkeep
+
+# Logs
+logs/
+!logs/.gitkeep
+
+/eval
+/outputs
+/HANDOFF.md
+/baseline_by_genre_plots
+/eval_key_plots
+/transcript_plots
 
 # Models
 models/
