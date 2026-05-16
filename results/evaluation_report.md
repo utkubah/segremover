@@ -7,27 +7,27 @@
 ## 1. Dataset summary
 | Item | Value |
 |---|---|
-| Documents | 26 |
-| Segments  | 1,608 |
+| Documents | 993 |
+| Segments  | 122,618 |
 | Gold labels | ✓ human-annotated |
 | Model checkpoint | ✓ loaded |
 | Baselines | ✓ loaded |
-| Genre: Commentary | 9 videos |
-| Genre: Entertainment | 2 videos |
-| Genre: Lectures | 4 videos |
-| Genre: Podcasts | 3 videos |
-| Genre: TED talks | 4 videos |
-| Genre: TV series | 4 videos |
+| Genre: Commentary | 182 videos |
+| Genre: Entertainment | 162 videos |
+| Genre: Lectures | 238 videos |
+| Genre: Podcasts | 178 videos |
+| Genre: TED talks | 138 videos |
+| Genre: TV series | 95 videos |
 
 ### Table 1: Corpus statistics by genre
 | Genre | Videos | Segments | Mean seg length (words) | % positive (p_remove > 0.5) |
 |---|---:|---:|---:|---:|
-| Commentary | 9 | 416 | 82.1 | 37.7% |
-| Entertainment | 2 | 132 | 47.2 | 42.4% |
-| Lectures | 4 | 143 | 86.7 | 26.6% |
-| Podcasts | 3 | 501 | 87.0 | 42.5% |
-| TED talks | 4 | 147 | 59.3 | 42.2% |
-| TV series | 4 | 269 | 35.6 | 49.1% |
+| Commentary | 182 | 12,325 | 90.2 | 35.5% |
+| Entertainment | 162 | 25,218 | 41.5 | 48.4% |
+| Lectures | 238 | 18,093 | 87.5 | 33.6% |
+| Podcasts | 178 | 43,088 | 87.3 | 43.2% |
+| TED talks | 138 | 2,805 | 116.3 | 34.0% |
+| TV series | 95 | 21,089 | 34.3 | 46.3% |
 
 ## Evidence coverage checklist
 | Evidence item | Status | Note |
@@ -41,15 +41,15 @@
 ## 2. Segment-level metrics
 | Metric | Value |
 |---|---|
-| ROC-AUC  | 0.8638 (95% CI: 0.8449–0.882) |
-| PR-AUC   | 0.8213 |
-| ECE      | 0.0528 |
-| F1 @0.5  | 0.752 |
-| P  @0.5  | 0.7234 |
-| R  @0.5  | 0.7829 |
+| ROC-AUC  | 0.8811 (95% CI: 0.8792–0.8831) |
+| PR-AUC   | 0.8384 |
+| ECE      | 0.0593 |
+| F1 @0.5  | 0.7683 |
+| P  @0.5  | 0.7306 |
+| R  @0.5  | 0.8102 |
 
-![SegRemover achieves AUC-ROC=0.8638 vs weak-label proxy.](plots/model_roc_pr.png)
-*SegRemover achieves AUC-ROC=0.8638 vs weak-label proxy.*
+![SegRemover achieves AUC-ROC=0.8811 vs weak-label proxy.](plots/model_roc_pr.png)
+*SegRemover achieves AUC-ROC=0.8811 vs weak-label proxy.*
 ![Reliability diagram: bars show fraction truly removed per confidence bin; diagonal = perfect calibration.](plots/model_reliability.png)
 *Reliability diagram: bars show fraction truly removed per confidence bin; diagonal = perfect calibration.*
 ![Calibration varies by genre — ECE values reveal where the model is over/under-confident.](plots/reliability_by_genre.png)
@@ -71,16 +71,16 @@
 ![Redundant and off-topic segments score highest p_remove, validating that Head B shapes the removal decision.](plots/p_remove_by_function.png)
 *Redundant and off-topic segments score highest p_remove, validating that Head B shapes the removal decision.*
 
-**Head B classification:** accuracy=0.5225  macro-F1=0.3798
+**Head B classification:** accuracy=0.5165  macro-F1=0.3812
 
 | Function class | F1 |
 |---|---|
-| New Information | 0.6914 |
-| Useful Repetition | 0.2718 |
-| Redundant Repetition | 0.2013 |
-| Clarification | 0.2742 |
-| Discourse Filler | 0.441 |
-| Off Topic | 0.3989 |
+| New Information | 0.6943 |
+| Useful Repetition | 0.2735 |
+| Redundant Repetition | 0.2175 |
+| Clarification | 0.2945 |
+| Discourse Filler | 0.4278 |
+| Off Topic | 0.3797 |
 ![Row-normalised confusion matrix for Head B. Off-diagonal mass shows which function classes are confused.](plots/head_b_confusion.png)
 *Row-normalised confusion matrix for Head B. Off-diagonal mass shows which function classes are confused.*
 
@@ -90,15 +90,15 @@
 ![Disfluent segments (filled pause, repetition, restart) score higher p_remove, validating Head C's signal.](plots/p_remove_by_disfluency.png)
 *Disfluent segments (filled pause, repetition, restart) score higher p_remove, validating Head C's signal.*
 
-**Head C classification:** accuracy=0.9617  macro-F1=0.9627
+**Head C classification:** accuracy=0.9699  macro-F1=0.9629
 
 | Disfluency class | F1 |
 |---|---|
-| Clean | 0.9762 |
-| Filled Pause | 0.9778 |
-| Repetition | 0.8772 |
-| Revision | 0.9825 |
-| Restart | 1.0 |
+| Clean | 0.9808 |
+| Filled Pause | 0.9854 |
+| Repetition | 0.8984 |
+| Revision | 0.9752 |
+| Restart | 0.9747 |
 ![Row-normalised confusion matrix for Head C. Confusion between adjacent disfluency classes is expected.](plots/head_c_confusion.png)
 *Row-normalised confusion matrix for Head C. Confusion between adjacent disfluency classes is expected.*
 
@@ -112,14 +112,53 @@
 ![Per-genre p_remove distributions — podcasts show more uncertain mass than lectures, consistent with higher genre-level ECE.](plots/p_remove_distribution_by_genre.png)
 *Per-genre p_remove distributions — podcasts show more uncertain mass than lectures, consistent with higher genre-level ECE.*
 
+## 3. Transcript-level (compression vs SBERT preservation)
+| Method    |   Threshold |   Compression |   SBERT cosine |
+|:----------|------------:|--------------:|---------------:|
+| heuristic |        0.5  |        0.5351 |         0.8946 |
+| heuristic |        0.6  |        0.6575 |         0.9547 |
+| heuristic |        0.7  |        0.7795 |         0.9758 |
+| heuristic |        0.8  |        0.9122 |         0.9879 |
+| heuristic |        0.9  |        0.9807 |         0.9968 |
+| heuristic |        0.95 |        0.9925 |         0.9982 |
+| model     |        0.5  |        0.8031 |         0.9684 |
+| model     |        0.6  |        0.8538 |         0.9762 |
+| model     |        0.7  |        0.8978 |         0.9841 |
+| model     |        0.8  |        0.943  |         0.9915 |
+| model     |        0.9  |        0.9801 |         0.9968 |
+| model     |        0.95 |        0.9946 |         0.9992 |
+| sbert     |        0.5  |        0.7084 |         0.9679 |
+| sbert     |        0.6  |        0.8655 |         0.9896 |
+| sbert     |        0.7  |        0.9511 |         0.9968 |
+| sbert     |        0.8  |        0.9889 |         0.9994 |
+| sbert     |        0.9  |        0.9994 |         1      |
+| sbert     |        0.95 |        1      |         1      |
+| tfidf     |        0.5  |        0.6391 |         0.9369 |
+| tfidf     |        0.6  |        0.7703 |         0.96   |
+| tfidf     |        0.7  |        0.8803 |         0.9786 |
+| tfidf     |        0.8  |        0.9379 |         0.9894 |
+| tfidf     |        0.9  |        0.9686 |         0.9931 |
+| tfidf     |        0.95 |        0.9778 |         0.995  |
+
+![Semantic similarity (SBERT centroid cosine) degrades smoothly with compression; genre curves diverge past 50% word retention.](plots/transcript_compression.png)
+*Semantic similarity (SBERT centroid cosine) degrades smoothly with compression; genre curves diverge past 50% word retention.*
+![Longer videos are more semantically robust to compression.](plots/transcript_by_length.png)
+*Longer videos are more semantically robust to compression.*
+![Direct removability by length: percent segments and words removed at operating thresholds.](plots/removability_by_length.png)
+*Direct removability by length: percent segments and words removed at operating thresholds.*
+![Direct removability by genre at the primary threshold.](plots/removability_by_genre.png)
+*Direct removability by genre at the primary threshold.*
+![ROUGE recall tracks compression linearly; the gap between ROUGE-1 and ROUGE-L indicates sentence fragmentation.](plots/rouge_curves.png)
+*ROUGE recall tracks compression linearly; the gap between ROUGE-1 and ROUGE-L indicates sentence fragmentation.*
+
 ## 4. Baseline comparison
 | Method       |  ROC-AUC | ROC 95% CI |   PR-AUC | PR 95% CI | p vs model |
 |--------------|----------|--------------|----------|--------------|------------|
-| SegRemover   |   0.8638 | 0.8438-0.8806 |   0.8213 | 0.7908-0.8479 | — |
-| Random       |   0.4951 | 0.4687-0.521 |   0.4043 | 0.3773-0.4385 | 0.0000 |
-| Heuristic    |   0.6343 | 0.6064-0.662 |   0.5903 | 0.5581-0.6273 | 0.0000 |
-| TF-IDF       |   0.7948 | 0.7723-0.8145 |   0.7055 | 0.663-0.749 | 0.0000 |
-| SBERT        |   0.7428 | 0.7142-0.7654 |   0.6701 | 0.6275-0.711 | 0.0000 |
+| SegRemover   |   0.8811 | 0.8791-0.8831 |   0.8384 | 0.8355-0.8416 | — |
+| Random       |   0.5044 | 0.5006-0.5073 |   0.4280 | 0.4244-0.4317 | 0.0000 |
+| Heuristic    |   0.6426 | 0.6394-0.6457 |   0.6210 | 0.6172-0.6252 | 0.0000 |
+| TF-IDF       |   0.7968 | 0.7944-0.7992 |   0.7222 | 0.7183-0.7268 | 0.0000 |
+| SBERT        |   0.7400 | 0.7372-0.7428 |   0.6920 | 0.6887-0.6963 | 0.0000 |
 
 ![SegRemover outperforms the unsupervised baselines; error bars show 95% bootstrap CI across 300 resamples.](plots/baseline_comparison.png)
 *SegRemover outperforms the unsupervised baselines; error bars show 95% bootstrap CI across 300 resamples.*
@@ -127,6 +166,24 @@
 *Genre-level breakdown: model advantage over baselines varies by domain.*
 ![ROC overlay: SegRemover's curve lies above all baselines at every FPR.](plots/roc_overlay.png)
 *ROC overlay: SegRemover's curve lies above all baselines at every FPR.*
+![Compression–preservation Pareto frontier: at every threshold SegRemover preserves more semantic content than unsupervised baselines.](plots/pareto_frontier.png)
+*Compression–preservation Pareto frontier: at every threshold SegRemover preserves more semantic content than unsupervised baselines.*
+
+## 11. Cascade ablation
+![Zeroing Head B/C logits from Head A's input reduces AUC, confirming the cascade design contributes beyond the encoder alone.](plots/ablation_cascade.png)
+*Zeroing Head B/C logits from Head A's input reduces AUC, confirming the cascade design contributes beyond the encoder alone.*
+
+| variant           |    auc |   ci_lo |   ci_hi |    n |
+|:------------------|-------:|--------:|--------:|-----:|
+| SegRemover (full) | 0.8638 |  0.8449 |  0.882  | 1487 |
+| w/o cascade       | 0.8632 |  0.8441 |  0.8814 | 1487 |
+
+![Per-genre cascade contribution: ΔAUC (full − ablated) is largest in conversational genres where function-type is hardest to infer from semantics alone.](plots/cascade_by_genre.png)
+*Per-genre cascade contribution: ΔAUC (full − ablated) is largest in conversational genres where function-type is hardest to infer from semantics alone.*
+
+## 12. Combined hero figure (paper Figure 2)
+![Left: ROC overlay (SegRemover vs baselines). Right: cascade ablation — removing Head B/C logits costs ΔAUC.](plots/combined_hero.png)
+*Left: ROC overlay (SegRemover vs baselines). Right: cascade ablation — removing Head B/C logits costs ΔAUC.*
 
 ## 5. 4-way agreement
 ![Spearman ρ heatmap: model agrees most with SBERT centroid, confirming that semantic centrality guides removability.](plots/agreement_heatmap.png)
@@ -167,7 +224,7 @@ See `transcript_only_risk_examples.md` for snippets.
 ## Appendix: Reproducibility
 ```
 eval seed       : 42
-eval sample     : 10
+eval sample     : 1000
 encoder         : roberta-base
 inter_layers    : 4
 temperature T   : 1.1

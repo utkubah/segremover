@@ -1,23 +1,23 @@
 # Data Audit
 
-- Documents in scope : 26
-- Segments in scope  : 1,608
-- Weak labels        : 1,608
-- Function labels    : 1,608
-- Disfluency labels  : 1,608
-- Baseline rows      : 1,608
+- Documents in scope : 993
+- Segments in scope  : 122,618
+- Weak labels        : 122,618
+- Function labels    : 122,618
+- Disfluency labels  : 122,618
+- Baseline rows      : 122,618
 - Gold (soft)        : 414  ← human-annotated
-- Model scores       : 1,487  (checkpoint loaded)
+- Model scores       : 99,032  (checkpoint loaded)
 
 ## Genre distribution
-  Commentary                9 videos
-  Entertainment             2 videos
-  Lectures                  4 videos
-  Podcasts                  3 videos
-  TED talks                 4 videos
-  TV series                 4 videos
+  Commentary              182 videos
+  Entertainment           162 videos
+  Lectures                238 videos
+  Podcasts                178 videos
+  TED talks               138 videos
+  TV series                95 videos
 
 ## Length-bucket distribution
-  long           15 videos
-  medium          7 videos
-  short           4 videos
+  long          666 videos
+  medium        299 videos
+  short          28 videos
