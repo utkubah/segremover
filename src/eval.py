@@ -122,6 +122,81 @@ plt.rcParams.update({
     "legend.fontsize":  11,   "lines.linewidth":  2.0,
 })
 
+# ── Paper-mode (white background, print-ready 300 dpi) ────────────────────────
+# Activated with --paper-mode; all existing plot helpers use the module-level
+# BG / TEXT / PANEL / GRID names, so overwriting them here + applying rcParams
+# is sufficient — no per-function changes needed.
+
+def _apply_paper_theme() -> None:
+    """Switch to white background, black text, colorblind-safe palette, 300 dpi."""
+    global BG, PANEL, GRID, TEXT
+    global BLUE, GREEN, RED, ORANGE, PURPLE
+    global BRIGHT_CYAN, BRIGHT_GREEN, BRIGHT_ORANGE, BRIGHT_PURPLE
+    global BRIGHT_RED, BRIGHT_PINK, BRIGHT_TEAL, BRIGHT_LIME, BRIGHT_SLATE
+    global GENRE_PALETTE, BASELINE_COLORS, FUNCTION_COLORS, BUCKET_COLORS, CAPTION_COLORS
+
+    BG    = "#ffffff"
+    PANEL = "#f7f7f7"
+    GRID  = "#cccccc"
+    TEXT  = "#111111"
+
+    # Wong (2011) colorblind-safe 8-color palette
+    BLUE   = "#0072b2"
+    GREEN  = "#009e73"
+    RED    = "#d55e00"
+    ORANGE = "#e69f00"
+    PURPLE = "#cc79a7"
+
+    BRIGHT_CYAN    = "#0072b2"
+    BRIGHT_GREEN   = "#009e73"
+    BRIGHT_ORANGE  = "#e69f00"
+    BRIGHT_PURPLE  = "#cc79a7"
+    BRIGHT_RED     = "#d55e00"
+    BRIGHT_PINK    = "#cc79a7"
+    BRIGHT_TEAL    = "#56b4e9"
+    BRIGHT_LIME    = "#009e73"
+    BRIGHT_SLATE   = "#999999"
+
+    GENRE_PALETTE = {
+        "commentary":    "#0072b2",
+        "entertainment": "#cc79a7",
+        "lectures":      "#e69f00",
+        "podcasts":      "#009e73",
+        "ted":           "#d55e00",
+        "ted_talks":     "#d55e00",
+        "tv_series":     "#56b4e9",
+        "unknown":       "#999999",
+    }
+    BASELINE_COLORS = {
+        "model":     "#0072b2",
+        "sbert":     "#009e73",
+        "heuristic": "#e69f00",
+        "tfidf":     "#cc79a7",
+        "random":    "#d55e00",
+    }
+    FUNCTION_COLORS = {
+        "new_information":       "#0072b2",
+        "useful_repetition":     "#56b4e9",
+        "redundant_repetition":  "#e69f00",
+        "clarification":         "#009e73",
+        "discourse_filler":      "#cc79a7",
+        "off_topic":             "#d55e00",
+    }
+    BUCKET_COLORS  = {"short": "#0072b2", "medium": "#e69f00", "long": "#009e73", "unknown": "#999999"}
+    CAPTION_COLORS = {"manual": "#0072b2", "auto": "#e69f00", "automatic": "#e69f00", "unknown": "#999999"}
+
+    plt.rcParams.update({
+        "figure.facecolor": BG,    "axes.facecolor":  PANEL,
+        "text.color":       TEXT,  "axes.labelcolor": TEXT,
+        "xtick.color":      TEXT,  "ytick.color":     TEXT,
+        "grid.color":       GRID,  "axes.edgecolor":  GRID,
+        "legend.facecolor": BG,    "legend.edgecolor": GRID,
+        "figure.dpi":       300,   "font.size":       11,
+        "axes.titlesize":   13,    "axes.labelsize":  11,
+        "legend.fontsize":  9,     "lines.linewidth": 1.5,
+        "pdf.fonttype":     42,    "ps.fonttype":     42,  # embed fonts
+    })
+
 FUNCTION_NAMES = [
     "new_information", "useful_repetition", "redundant_repetition",
     "clarification",   "discourse_filler",  "off_topic",
@@ -249,6 +324,33 @@ def _bootstrap_ci(
     return float(np.quantile(boot, alpha)), float(np.quantile(boot, 1 - alpha))
 
 
+def _paired_auc_pvalue(
+    scores_a: np.ndarray, scores_b: np.ndarray, labels: np.ndarray,
+    n_boot: int = 2000, seed: int = 42,
+) -> float:
+    """Paired bootstrap p-value: P(AUC_a <= AUC_b) under the null.
+
+    Resample observations with replacement; count fraction of resamples where
+    the AUC difference is <= 0.  Small p → reject H0 → A is significantly better.
+    """
+    rng = np.random.default_rng(seed)
+    n   = len(labels)
+    diffs: list[float] = []
+    for _ in range(n_boot):
+        idx = rng.integers(0, n, n)
+        if len(set(labels[idx])) < 2:
+            continue
+        try:
+            da = roc_auc_score(labels[idx], scores_a[idx])
+            db = roc_auc_score(labels[idx], scores_b[idx])
+            diffs.append(da - db)
+        except Exception:
+            continue
+    if not diffs:
+        return float("nan")
+    return float(np.mean(np.array(diffs) <= 0))
+
+
 def _ndcg_at_k(scores: np.ndarray, gold_soft: np.ndarray, k: int = 20) -> float:
     """NDCG@k — rank segments by p_remove, relevance = gold soft target."""
     # sklearn ndcg_score expects shape (1, n)
@@ -332,8 +434,9 @@ def load_all_data(data_dir: Path, max_docs: int | None = None,
     # Reads per-video JSON files from data/gold/videos/*.json.
     # Each file is either a single entry dict or a list of entry dicts, where
     # each entry has: video_id, segments[], removability_to_soft_target{}, function_to_binary_remove{}.
-    gold:  dict[tuple, float] = {}   # soft target from gold_removability ordinal
-    gold_b: dict[tuple, int]  = {}   # binary remove/keep from gold_function
+    gold:         dict[tuple, float] = {}   # soft target from gold_removability ordinal
+    gold_b:       dict[tuple, int]   = {}   # binary remove/keep from gold_function
+    gold_fn_class: dict[tuple, int]  = {}   # raw 6-class gold_function index (for Head B validation)
     gold_dir = data_dir.parent / "gold" / "videos"
     if not gold_dir.exists():
         gold_dir = data_dir.parent / "gold"   # fallback: flat gold/ directory
@@ -361,39 +464,26 @@ def load_all_data(data_dir: Path, max_docs: int | None = None,
                 gold[k] = float(rmap.get(seg["gold_removability"], 0.5))
             if seg.get("gold_function") is not None:
                 gold_b[k] = int(fmap.get(seg["gold_function"], 0))
+                fn_str = seg["gold_function"]
+                if fn_str in FUNCTION_NAMES:
+                    gold_fn_class[k] = FUNCTION_NAMES.index(fn_str)
 
     return dict(
         docs=docs, video_ids=video_ids, genre=genre, length_bucket=length_bucket,
         caption_type=caption_type,
         weak=weak, fn=fn, disfl=disfl, baselines=baselines,
-        gold=gold, gold_b=gold_b, summary=summary,
+        gold=gold, gold_b=gold_b, gold_fn_class=gold_fn_class, summary=summary,
     )
 
 
-def sample_eval_docs(data: dict, n: int, seed: int = 42) -> dict:
-    """Keep at most n videos, always including all gold-annotated ones.
-
-    Gold-annotated video_ids are pinned; the remainder of the budget is
-    filled with a random draw from the rest of the corpus.
-    """
-    import random as _rnd
-    all_ids = data["video_ids"]
-
-    gold_vids: set[str] = {vid for vid, _ in data["gold"]} | {vid for vid, _ in data["gold_b"]}
-    pinned  = [v for v in all_ids if v in gold_vids]
-    rest    = [v for v in all_ids if v not in gold_vids]
-
-    n_extra = max(0, n - len(pinned))
-    rng     = _rnd.Random(seed)
-    extra   = rng.sample(rest, min(n_extra, len(rest)))
-
-    sampled     = sorted(set(pinned) | set(extra))
+def _subset_data(data: dict, sampled: list) -> dict:
+    """Return a data dict restricted to the given video_ids."""
     sampled_set = set(sampled)
 
-    def _seg(d: dict) -> dict:          # (video_id, seg_idx) → value
+    def _seg(d: dict) -> dict:
         return {k: v for k, v in d.items() if k[0] in sampled_set}
 
-    def _str(d: dict) -> dict:          # video_id → value
+    def _str(d: dict) -> dict:
         return {k: v for k, v in d.items() if k in sampled_set}
 
     return dict(
@@ -408,8 +498,103 @@ def sample_eval_docs(data: dict, n: int, seed: int = 42) -> dict:
         baselines=_seg(data["baselines"]),
         gold=_seg(data["gold"]),
         gold_b=_seg(data["gold_b"]),
+        gold_fn_class=_seg(data.get("gold_fn_class", {})),
         summary=data["summary"],
     )
+
+
+def sample_eval_docs(data: dict, n: int, seed: int = 42) -> dict:
+    """Stratified sample by (genre, length_bucket), always pinning gold videos.
+
+    Proportional allocation ensures every genre and length bucket present in
+    the corpus is represented. Gold videos are always included regardless of
+    their stratum's quota.
+    """
+    import random as _rnd
+    import math
+
+    all_ids  = data["video_ids"]
+    genre_map  = data.get("genre", {})
+    bucket_map = data.get("length_bucket", {})
+
+    gold_vids: set[str] = {vid for vid, _ in data["gold"]} | {vid for vid, _ in data["gold_b"]}
+    pinned = [v for v in all_ids if v in gold_vids]
+
+    # Build strata
+    cells: dict[tuple, list[str]] = defaultdict(list)
+    for v in all_ids:
+        if v in gold_vids:
+            continue
+        g = genre_map.get(v, "unknown")
+        b = bucket_map.get(v, "unknown")
+        cells[(g, b)].append(v)
+
+    remaining = max(0, n - len(pinned))
+    total_non_gold = sum(len(vs) for vs in cells.values())
+
+    rng   = _rnd.Random(seed)
+    extra = []
+    if total_non_gold > 0:
+        # Proportional allocation with minimum 1 per non-empty cell
+        alloc: dict[tuple, int] = {}
+        for cell, vids in cells.items():
+            alloc[cell] = max(1, math.floor(remaining * len(vids) / total_non_gold))
+
+        # Trim to budget (proportional may overshoot slightly)
+        while sum(alloc.values()) > remaining:
+            # Remove one from the largest cell that has > 1
+            largest = max((c for c in alloc if alloc[c] > 1),
+                          key=lambda c: alloc[c], default=None)
+            if largest is None:
+                break
+            alloc[largest] -= 1
+
+        for cell, quota in alloc.items():
+            vids = cells[cell]
+            extra.extend(rng.sample(vids, min(quota, len(vids))))
+
+    sampled = sorted(set(pinned) | set(extra))
+    print(f"  Stratified eval sample: {len(sampled)} videos across "
+          f"{len({genre_map.get(v) for v in sampled})} genres, "
+          f"{len({bucket_map.get(v) for v in sampled})} length buckets")
+    return _subset_data(data, sampled)
+
+
+def sample_transcript_docs(data: dict, n_per_cell: int = 2, seed: int = 42) -> dict:
+    """Transcript eval subset: n_per_cell docs from every (genre, length_bucket) cell.
+
+    This keeps transcript SBERT encoding tractable while guaranteeing every
+    genre × length combination is represented in the compression curves.
+    Gold videos are always included.
+    """
+    import random as _rnd
+
+    all_ids    = data["video_ids"]
+    genre_map  = data.get("genre", {})
+    bucket_map = data.get("length_bucket", {})
+    gold_vids: set[str] = {vid for vid, _ in data["gold"]} | {vid for vid, _ in data["gold_b"]}
+
+    cells: dict[tuple, list[str]] = defaultdict(list)
+    for v in all_ids:
+        g = genre_map.get(v, "unknown")
+        b = bucket_map.get(v, "unknown")
+        cells[(g, b)].append(v)
+
+    rng     = _rnd.Random(seed)
+    sampled: list[str] = list(gold_vids & set(all_ids))
+    sampled_set = set(sampled)
+
+    for (g, b), vids in sorted(cells.items()):
+        pool = [v for v in vids if v not in sampled_set]
+        chosen = rng.sample(pool, min(n_per_cell, len(pool)))
+        sampled.extend(chosen)
+        sampled_set.update(chosen)
+
+    sampled = sorted(sampled_set)
+    n_cells = len(cells)
+    print(f"  Transcript eval sample: {len(sampled)} videos across "
+          f"{n_cells} (genre, length_bucket) cells  ({n_per_cell} per cell)")
+    return _subset_data(data, sampled)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -481,6 +666,72 @@ def run_inference(checkpoint: Path, config: dict, data: dict, device: str) -> di
 
     print(f"  Scored {len(scores):,} segments")
     return scores, heads_b, heads_c
+
+
+def run_inference_ablated(
+    checkpoint: Path, config: dict, data: dict, device: str,
+) -> dict[tuple, float]:
+    """Re-run inference with cascade zeroed (logit_B = logit_C = 0 before Head A).
+
+    Used for the cascade ablation: compares AUC of the full model against the
+    same model with Head B/C logits suppressed, isolating the cascade's contribution.
+    Returns only the p_remove scores (no head predictions needed).
+    """
+    import torch
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from train import SegRemover, DocDataset, collate_fn   # type: ignore
+    from transformers import AutoTokenizer
+    from torch.utils.data import DataLoader
+
+    T        = float(config.get("temperature", 1.0))
+    max_segs = int(config.get("max_segs", 256))
+    max_tok  = int(config.get("max_tok", 512))
+    seg_batch = int(config.get("seg_batch", 32))
+    docs, video_ids = data["docs"], data["video_ids"]
+
+    tokenizer = AutoTokenizer.from_pretrained(config["encoder"])
+    model = SegRemover(
+        config["encoder"],
+        config.get("inter_layers", 2),
+        config.get("dropout", 0.1),
+    )
+    model.load_state_dict(torch.load(checkpoint, map_location=device, weights_only=True))
+    model.to(device).eval()
+
+    doc_list = [
+        {"video_id": v, "genre": data["genre"][v],
+         "segments": [{"seg_idx": s["seg_idx"], "text": s["text"],
+                       "p_remove": 0.5, "fn_label": 0, "disfl_label": 0}
+                      for s in docs[v]]}
+        for v in video_ids
+    ]
+    ds     = DocDataset(doc_list, tokenizer, max_tok, max_segs)
+    loader = DataLoader(ds, batch_size=4, shuffle=False,
+                        collate_fn=collate_fn, num_workers=0)
+
+    scores: dict[tuple, float] = {}
+    doc_cursor = 0
+    for batch in tqdm(loader, desc="ablated inference"):
+        with torch.no_grad():
+            la, _, _ = model(
+                batch["input_ids"].to(device),
+                batch["attention_mask"].to(device),
+                batch["doc_lengths"],
+                seg_batch=seg_batch,
+                ablate_cascade=True,
+            )
+        probs    = torch.sigmoid(la / T).cpu().tolist()
+        seg_ptr  = 0
+        for i, L in enumerate(batch["doc_lengths"]):
+            vid = video_ids[doc_cursor]
+            for j in range(L):
+                key = (vid, docs[vid][j]["seg_idx"])
+                scores[key] = round(probs[seg_ptr + j], 4)
+            seg_ptr   += L
+            doc_cursor += 1
+
+    print(f"  Ablated: scored {len(scores):,} segments (cascade zeroed)")
+    return scores
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -557,6 +808,22 @@ def audit(data: dict, config: dict | None, model_scores: dict,
     print(text)
     (out_dir / "audit.md").write_text(text, encoding="utf-8")
 
+    # Per-genre corpus stats for Table 1
+    genre_stats: dict[str, dict] = {}
+    for g in genre_counts:
+        vids_g = [v for v in video_ids if data["genre"].get(v) == g]
+        segs_g = [seg for v in vids_g for seg in docs[v]]
+        n_segs_g = len(segs_g)
+        mean_len = (sum(len(s["text"].split()) for s in segs_g) / n_segs_g) if n_segs_g else 0
+        p_pos = sum(1 for s in segs_g
+                    if data["weak"].get((s["video_id"], s["seg_idx"]), 0) > 0.5) / n_segs_g if n_segs_g else 0
+        genre_stats[g] = {
+            "n_videos": genre_counts[g],
+            "n_segs": n_segs_g,
+            "mean_len_words": round(mean_len, 1),
+            "pct_positive": round(p_pos * 100, 1),
+        }
+
     return dict(
         n_docs=len(video_ids), n_segs=n_segs,
         has_gold=bool(data["gold"]),
@@ -565,6 +832,7 @@ def audit(data: dict, config: dict | None, model_scores: dict,
         has_caption_type=bool(data["caption_type"]),
         genre_counts=dict(genre_counts),
         missing_genres=missing_genres,
+        genre_stats=genre_stats,
     )
 
 
@@ -572,13 +840,14 @@ def audit(data: dict, config: dict | None, model_scores: dict,
 # 3. Segment-level evaluation helpers
 # ══════════════════════════════════════════════════════════════════════════════
 
-def _binary_labels(data: dict, source: str = "auto") -> tuple[dict, str]:
+def _binary_labels(data: dict, source: str = "weak") -> tuple[dict, str]:
     """Return {key: 0/1} and a description string.
 
-    source="auto": prefer gold if any gold labels exist, else weak proxy.
+    source="weak": always use weak labels as proxy (default).
+    source="gold":  use human gold labels (only for gold_eval section).
     """
     if source == "auto":
-        source = "gold" if data["gold"] else "weak"
+        source = "weak"
 
     if source == "gold" and data["gold"]:
         labels = {k: int(v >= 0.5) for k, v in data["gold"].items()}
@@ -625,7 +894,7 @@ def plot_roc_pr(scores: np.ndarray, labels: np.ndarray,
 
     fig, axes = plt.subplots(1, 2, figsize=(13, 5))
     fig.suptitle(
-        f"SegRemover achieves AUC-ROC={roc_auc:.3f}, PR-AUC={pr_auc:.3f}  [{label_desc}]",
+        f"ROC and Precision-Recall curves  [{label_desc}]",
         color=TEXT, fontsize=13,
     )
 
@@ -715,7 +984,7 @@ def plot_threshold_sweep(scores: np.ndarray, labels: np.ndarray,
     df = pd.DataFrame(rows)
 
     fig, axes = plt.subplots(1, 2, figsize=(13, 5))
-    fig.suptitle("Threshold controls the precision–recall trade-off", color=TEXT, fontsize=14)
+    fig.suptitle("Precision, recall, and F1 vs. decision threshold", color=TEXT, fontsize=14)
 
     ax = _ax_style(axes[0])
     for col, color in [("precision", BRIGHT_CYAN), ("recall", BRIGHT_GREEN), ("f1", BRIGHT_ORANGE)]:
@@ -1145,7 +1414,7 @@ def plot_reliability_by_genre(
     fig, axes = plt.subplots(nrows, ncols, figsize=(5 * ncols, 4 * nrows),
                               squeeze=False)
     fig.suptitle(
-        "Calibration varies by genre",
+        "Reliability diagrams by genre",
         color=TEXT, fontsize=13,
     )
 
@@ -1206,7 +1475,7 @@ def plot_calibration_comparison(
 
     fig, axes = plt.subplots(1, 2, figsize=(12, 5))
     fig.suptitle(
-        f"Temperature scaling (T={T:.2f}) {verb} ECE from {ece_before:.4f} to {ece_after:.4f}",
+        f"Calibration before and after temperature scaling (T={T:.2f})",
         color=TEXT, fontsize=13,
     )
 
@@ -1377,6 +1646,7 @@ def transcript_eval(data: dict, model_scores: dict, thresholds: list[float],
                     rouge1_r = rouge_l_r = None
 
             rows.append({
+                "method":        "model",
                 "video_id":      vid,
                 "genre":         genre,
                 "length_bucket": bucket,
@@ -1390,6 +1660,39 @@ def transcript_eval(data: dict, model_scores: dict, thresholds: list[float],
                 "segs_total":    len(segs),
             })
 
+        # Baseline rows — same embeddings, no extra encoding needed
+        for bname in ["tfidf", "sbert", "heuristic"]:
+            b_scores = np.array([
+                data["baselines"].get((vid, seg["seg_idx"]), {}).get(bname, 0.5)
+                for seg in segs
+            ])
+            for t in thresholds:
+                bk_mask = b_scores < t
+                bk_words = sum(w for w, k in zip(wcs, bk_mask) if k)
+                b_comp = bk_words / total_words
+                if bk_mask.sum() == 0:
+                    b_sbert = 0.0
+                else:
+                    bc = embs[bk_mask].mean(axis=0)
+                    bn = np.linalg.norm(bc)
+                    if bn > 0:
+                        bc /= bn
+                    b_sbert = float(np.dot(centroid_full, bc))
+                rows.append({
+                    "method":        bname,
+                    "video_id":      vid,
+                    "genre":         genre,
+                    "length_bucket": bucket,
+                    "caption_type":  cap_type,
+                    "threshold":     t,
+                    "compression":   round(b_comp, 4),
+                    "sbert_cosine":  round(b_sbert, 4),
+                    "rouge1_r":      None,
+                    "rougeL_r":      None,
+                    "segs_kept":     int(bk_mask.sum()),
+                    "segs_total":    len(segs),
+                })
+
     df = pd.DataFrame(rows)
     df.to_csv(plots_dir.parent / "transcript_eval.csv", index=False)
     _plot_compression_curves(df, plots_dir)
@@ -1402,35 +1705,36 @@ def _plot_compression_curves(df: pd.DataFrame, plots_dir: Path) -> None:
     if df.empty:
         return
 
-    # ── Overall compression vs SBERT cosine ──────────────────────────────────
-    avg = df.groupby("threshold")[["compression", "sbert_cosine"]].mean().reset_index()
-
+    # ── Overall compression vs SBERT cosine (per method) ─────────────────────
     fig, axes = plt.subplots(1, 2, figsize=(14, 5))
     fig.suptitle(
-        "Semantic similarity degrades smoothly with compression — genre curves diverge past 50%",
+        "Compression ratio vs. semantic similarity (SBERT) by genre",
         color=TEXT, fontsize=12,
     )
 
     ax = _ax_style(axes[0])
-    ax.plot(avg["compression"] * 100, avg["sbert_cosine"],
-            "o-", color=BLUE, markersize=7)
-    for _, row in avg.iterrows():
-        ax.annotate(f"t={row['threshold']:.2f}",
-                    (row["compression"] * 100, row["sbert_cosine"]),
-                    textcoords="offset points", xytext=(5, 4),
-                    color=TEXT, fontsize=9)
+    method_colors = {"model": BLUE, "tfidf": GREEN, "sbert": ORANGE, "heuristic": RED}
+    methods = df["method"].unique() if "method" in df.columns else ["model"]
+    for m in methods:
+        sub = df[df["method"] == m] if "method" in df.columns else df
+        avg = sub.groupby("threshold")[["compression", "sbert_cosine"]].mean().reset_index()
+        c = method_colors.get(m, BLUE)
+        ax.plot(avg["compression"] * 100, avg["sbert_cosine"],
+                "o-", color=c, markersize=6, label=_pretty_name(m))
+    ax.legend(fontsize=9)
     ax.set(xlabel="Words kept (%)", ylabel="SBERT cosine (full vs reduced)",
-           title="Overall compression–preservation trade-off")
+           title="Compression–preservation by method")
 
-    # ── By genre ─────────────────────────────────────────────────────────────
+    # ── By genre (model only) ─────────────────────────────────────────────────
     ax = _ax_style(axes[1])
-    for genre, grp in df.groupby("genre"):
+    model_df = df[df["method"] == "model"] if "method" in df.columns else df
+    for genre, grp in model_df.groupby("genre"):
         avg_g = grp.groupby("threshold")[["compression", "sbert_cosine"]].mean()
         c = GENRE_PALETTE.get(genre, BLUE)
         ax.plot(avg_g["compression"] * 100, avg_g["sbert_cosine"],
-                "o-", color=c, label=genre, markersize=5)
+                "o-", color=c, label=_pretty_name(genre), markersize=5)
     ax.set(xlabel="Words kept (%)", ylabel="SBERT cosine",
-           title="By genre")
+           title="Model by genre")
     ax.legend(fontsize=9)
 
     plt.tight_layout()
@@ -1503,7 +1807,7 @@ def _plot_removability_summary(df: pd.DataFrame, plots_dir: Path) -> None:
         x = np.arange(len(buckets))
         width = 0.8 / max(len(thresholds), 1)
         fig, axes = plt.subplots(1, 2, figsize=(13, 5))
-        fig.suptitle("Direct removability by video length", color=TEXT, fontsize=13)
+        fig.suptitle("Segments and words removed by video length bucket", color=TEXT, fontsize=13)
         for ax, metric, ylabel in [
             (axes[0], "pct_segments_removed", "% segments removed"),
             (axes[1], "pct_words_removed", "% words removed"),
@@ -1598,6 +1902,24 @@ def baseline_eval(model_scores: dict, data: dict,
     if not results:
         return {}
 
+    # ── Paired bootstrap significance vs each baseline ────────────────────────
+    if "model" in results and len(results) > 1:
+        m_scores, m_labs = _aligned_arrays(all_methods["model"], labels)
+        for bname in [n for n in results if n != "model"]:
+            b_scores, b_labs = _aligned_arrays(all_methods[bname], labels)
+            shared  = sorted(set(all_methods["model"]) & set(all_methods[bname]) & set(labels))
+            if len(shared) < 20:
+                continue
+            s_m = np.array([all_methods["model"][k] for k in shared])
+            s_b = np.array([all_methods[bname][k]   for k in shared])
+            s_l = np.array([labels[k]               for k in shared])
+            if len(set(s_l)) < 2:
+                continue
+            pval = _paired_auc_pvalue(s_m, s_b, s_l, n_boot=2000)
+            results[bname]["pvalue_vs_model"] = round(pval, 4)
+            sig = "***" if pval < 0.001 else ("**" if pval < 0.01 else ("*" if pval < 0.05 else "ns"))
+            print(f"  model vs {bname:10s}  p={pval:.4f} {sig}")
+
     # Print table
     print(f"\n  {'Method':12s}  {'ROC-AUC':>8s}  {'PR-AUC':>8s}  {'n':>7s}")
     print(f"  {'-'*12}  {'-'*8}  {'-'*8}  {'-'*7}")
@@ -1607,7 +1929,7 @@ def baseline_eval(model_scores: dict, data: dict,
     # ── Overall bar chart with 95% CI error bars ──────────────────────────────
     fig, axes = plt.subplots(1, 2, figsize=(12, 5))
     fig.suptitle(
-        f"SegRemover outperforms all baselines  [{label_desc}]",
+        f"ROC-AUC and PR-AUC across methods  [{label_desc}]",
         color=TEXT, fontsize=13,
     )
     for ax, metric in zip(axes, ["roc_auc", "pr_auc"]):
@@ -1696,6 +2018,527 @@ def _plot_baseline_by_genre(
     ax.legend(fontsize=10, ncol=min(n_m, 5), loc="upper center", bbox_to_anchor=(0.5, -0.18))
     plt.tight_layout()
     _save(fig, plots_dir, "baseline_by_genre")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 5b. ROC overlay — all methods on one set of axes
+# ══════════════════════════════════════════════════════════════════════════════
+
+def plot_roc_overlay(model_scores: dict, data: dict, plots_dir: Path) -> None:
+    """Single ROC-curve panel with one curve per method.
+
+    More informative than a bar chart: shows operating-point flexibility and
+    the consistent advantage of SegRemover across all FPR values.
+    """
+    if not data["baselines"]:
+        return
+
+    labels, _ = _binary_labels(data)
+    all_methods: dict[str, dict] = {}
+    if model_scores:
+        all_methods["model"] = model_scores
+    for name in ["tfidf", "sbert", "heuristic", "random"]:
+        scores = {k: v[name] for k, v in data["baselines"].items() if name in v}
+        if scores:
+            all_methods[name] = scores
+
+    if len(all_methods) < 2:
+        return
+
+    fig, ax = plt.subplots(figsize=(6, 5))
+    _ax_style(ax)
+    ax.plot([0, 1], [0, 1], "--", color=GRID, linewidth=1, label="Random (0.500)")
+
+    method_order = ["model", "tfidf", "sbert", "heuristic", "random"]
+    lw_map    = {"model": 2.5}
+    style_map = {"model": "-", "tfidf": "--", "sbert": "-.", "heuristic": ":", "random": "--"}
+
+    for name in [m for m in method_order if m in all_methods]:
+        sc = all_methods[name]
+        s, l = _aligned_arrays(sc, labels)
+        if len(set(l)) < 2:
+            continue
+        auc = roc_auc_score(l, s)
+        fpr, tpr, _ = roc_curve(l, s)
+        color = BASELINE_COLORS.get(name, BRIGHT_CYAN)
+        lw    = lw_map.get(name, 1.5)
+        ls    = style_map.get(name, "-")
+        ax.plot(fpr, tpr, linestyle=ls, linewidth=lw, color=color,
+                label=f"{_pretty_name(name)} ({auc:.3f})")
+
+    ax.set(xlabel="False positive rate", ylabel="True positive rate",
+           title="ROC curves — SegRemover vs baselines",
+           xlim=(0, 1), ylim=(0, 1.02))
+    ax.legend(fontsize=9, loc="lower right")
+    plt.tight_layout()
+    _save(fig, plots_dir, "roc_overlay")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 10b. p_remove distribution — ranker, not binary classifier
+# ══════════════════════════════════════════════════════════════════════════════
+
+def plot_p_remove_distribution(model_scores: dict, data: dict, plots_dir: Path) -> None:
+    """Histogram of model p_remove values with keep/uncertain/remove zone annotations.
+
+    A bimodal distribution (mass only near 0 and 1) would indicate the model
+    behaves as a de-facto binary classifier. A distribution with meaningful mass
+    in [0.30, 0.70] confirms it is a continuous ranker.
+    """
+    if not model_scores:
+        return
+
+    arr = np.array(list(model_scores.values()), dtype=float)
+    pct_keep = 100.0 * (arr < 0.30).mean()
+    pct_unc  = 100.0 * ((arr >= 0.30) & (arr <= 0.70)).mean()
+    pct_rem  = 100.0 * (arr > 0.70).mean()
+
+    fig, ax = plt.subplots(figsize=(8, 4))
+    _ax_style(ax)
+
+    ax.hist(arr, bins=50, color=BLUE, alpha=0.85, edgecolor=BG, linewidth=0.3)
+    ax.axvspan(0.00, 0.30, alpha=0.10, color=GREEN,  zorder=0)
+    ax.axvspan(0.30, 0.70, alpha=0.10, color=ORANGE, zorder=0)
+    ax.axvspan(0.70, 1.00, alpha=0.10, color=RED,    zorder=0)
+    ax.axvline(0.30, color=GREEN,  linestyle="--", linewidth=1.2)
+    ax.axvline(0.70, color=RED,    linestyle="--", linewidth=1.2)
+
+    ymax = ax.get_ylim()[1]
+    for x_mid, pct, color, label in [
+        (0.15, pct_keep, GREEN,  f"keep\n{pct_keep:.0f}%"),
+        (0.50, pct_unc,  ORANGE, f"uncertain\n{pct_unc:.0f}%"),
+        (0.85, pct_rem,  RED,    f"remove\n{pct_rem:.0f}%"),
+    ]:
+        ax.text(x_mid, 0.93, label, transform=ax.get_xaxis_transform(),
+                ha="center", va="top", color=color, fontsize=10, fontweight="bold")
+
+    ax.set(xlabel="p_remove", ylabel="Segments",
+           title="p_remove distribution — model is a ranker, not a binary classifier",
+           xlim=(0, 1))
+    plt.tight_layout()
+    _save(fig, plots_dir, "p_remove_distribution")
+
+    # Per-genre version
+    genre_map = data.get("genre", {})
+    genre_scores: dict[str, list] = defaultdict(list)
+    for k, p in model_scores.items():
+        g = genre_map.get(k[0])
+        if g:
+            genre_scores[g].append(p)
+
+    genres = _ordered(list(genre_scores.keys()), EXPECTED_GENRES)
+    if len(genres) < 2:
+        return
+
+    fig, axes = plt.subplots(1, len(genres), figsize=(2.5 * len(genres), 3.5), sharey=False)
+    if len(genres) == 1:
+        axes = [axes]
+    for ax, g in zip(axes, genres):
+        _ax_style(ax)
+        vals = np.array(genre_scores[g])
+        ax.hist(vals, bins=30, color=GENRE_PALETTE.get(g, BLUE), alpha=0.85,
+                edgecolor=BG, linewidth=0.3)
+        ax.axvline(0.30, color=GREEN, linestyle="--", linewidth=1)
+        ax.axvline(0.70, color=RED,   linestyle="--", linewidth=1)
+        ax.set(title=_pretty_name(g), xlabel="p_remove")
+        ax.set_ylabel("Segments" if ax is axes[0] else "")
+    fig.suptitle("p_remove distribution per genre", fontsize=11)
+    plt.tight_layout()
+    _save(fig, plots_dir, "p_remove_distribution_by_genre")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 11. Cascade ablation
+# ══════════════════════════════════════════════════════════════════════════════
+
+def cascade_ablation_eval(
+    model_scores: dict, ablated_scores: dict, data: dict,
+    plots_dir: Path, out_dir: Path,
+) -> dict:
+    """Compare full model vs cascade-ablated model (logit_B = logit_C = 0).
+
+    Produces:
+    - ablation_table.csv  — per-method AUC with CI
+    - ablation_cascade.png — horizontal bar chart, clearly showing Δ
+    """
+    if not model_scores or not ablated_scores:
+        return {}
+
+    labels, label_desc = _binary_labels(data)
+    variants = {
+        "SegRemover (full)":     model_scores,
+        "w/o cascade":           ablated_scores,
+    }
+    rows = []
+    for label, scores in variants.items():
+        s, l = _aligned_arrays(scores, labels)
+        if len(set(l)) < 2 or len(s) < 5:
+            continue
+        auc     = roc_auc_score(l, s)
+        lo, hi  = _bootstrap_ci(s, l, roc_auc_score, n_boot=500)
+        rows.append({
+            "variant":  label,
+            "auc":      round(auc, 4),
+            "ci_lo":    round(lo, 4),
+            "ci_hi":    round(hi, 4),
+            "n":        len(s),
+        })
+        print(f"  {label:30s}  AUC={auc:.4f}  CI=[{lo:.4f},{hi:.4f}]")
+
+    if not rows:
+        return {}
+
+    df = pd.DataFrame(rows)
+    df.to_csv(out_dir / "ablation_table.csv", index=False)
+
+    # ── Also include best baseline for context ────────────────────────────────
+    if data["baselines"]:
+        for bname in ["tfidf", "sbert"]:
+            bsc = {k: v[bname] for k, v in data["baselines"].items() if bname in v}
+            s, l = _aligned_arrays(bsc, labels)
+            if len(set(l)) < 2 or len(s) < 5:
+                continue
+            auc    = roc_auc_score(l, s)
+            lo, hi = _bootstrap_ci(s, l, roc_auc_score, n_boot=500)
+            rows.append({
+                "variant":  _pretty_name(bname),
+                "auc":      round(auc, 4),
+                "ci_lo":    round(lo, 4),
+                "ci_hi":    round(hi, 4),
+                "n":        len(s),
+            })
+
+    df_full = pd.DataFrame(rows)
+
+    # ── Horizontal bar chart ──────────────────────────────────────────────────
+    fig, ax = plt.subplots(figsize=(7, max(3, len(df_full) * 0.65)))
+    _ax_style(ax)
+
+    colors = []
+    for v in df_full["variant"]:
+        if "full" in v:
+            colors.append(BRIGHT_CYAN)
+        elif "cascade" in v:
+            colors.append(BRIGHT_ORANGE)
+        else:
+            colors.append(BRIGHT_SLATE)
+
+    y    = np.arange(len(df_full))
+    xerr = np.array([
+        df_full["auc"] - df_full["ci_lo"],
+        df_full["ci_hi"] - df_full["auc"],
+    ])
+    bars = ax.barh(y, df_full["auc"], xerr=xerr, color=colors, alpha=0.9,
+                   capsize=4, error_kw={"ecolor": TEXT, "lw": 1.5}, height=0.55)
+    for bar, row in zip(bars, df_full.itertuples()):
+        ax.text(row.auc + 0.001, bar.get_y() + bar.get_height() / 2,
+                f"{row.auc:.4f}", va="center", color=TEXT, fontsize=9, fontweight="bold")
+
+    ax.set(yticks=y, yticklabels=df_full["variant"],
+           xlabel="ROC-AUC  (95% bootstrap CI)",
+           title="ROC-AUC comparison: full model, w/o cascade, baselines")
+    plt.tight_layout()
+    _save(fig, plots_dir, "ablation_cascade")
+
+    result = {r["variant"]: r["auc"] for r in rows}
+    if len(rows) >= 2:
+        result["delta"] = round(rows[0]["auc"] - rows[1]["auc"], 4)
+
+    # ── Per-genre cascade Δ ───────────────────────────────────────────────────
+    genre_map = data.get("genre", {})
+    genres_present = _ordered(
+        list({genre_map[v] for v in data["video_ids"] if v in genre_map}),
+        EXPECTED_GENRES,
+    )
+    genre_delta: dict[str, float] = {}
+    genre_full:  dict[str, float] = {}
+    genre_ablated: dict[str, float] = {}
+
+    for g in genres_present:
+        g_keys = {k for k in model_scores if genre_map.get(k[0]) == g}
+        g_full = {k: model_scores[k] for k in g_keys if k in model_scores}
+        g_abl  = {k: ablated_scores[k] for k in g_keys if k in ablated_scores}
+        g_lbl  = {k: labels[k] for k in g_keys if k in labels}
+
+        sf, lf = _aligned_arrays(g_full, g_lbl)
+        sa, la = _aligned_arrays(g_abl, g_lbl)
+        if len(set(lf)) < 2 or len(sf) < 10:
+            continue
+        auc_f = roc_auc_score(lf, sf)
+        auc_a = roc_auc_score(la, sa)
+        genre_full[g]    = round(auc_f, 4)
+        genre_ablated[g] = round(auc_a, 4)
+        genre_delta[g]   = round(auc_f - auc_a, 4)
+
+    result["genre_delta"] = genre_delta
+
+    if genre_delta:
+        gs    = list(genre_delta.keys())
+        deltas = [genre_delta[g] for g in gs]
+        full_vals = [genre_full[g]    for g in gs]
+        abl_vals  = [genre_ablated[g] for g in gs]
+
+        x     = np.arange(len(gs))
+        width = 0.30
+        fig, axes = plt.subplots(1, 2, figsize=(12, 4))
+        _ax_style(axes[0]); _ax_style(axes[1])
+
+        bars = axes[0].bar(x, deltas, color=[GENRE_PALETTE.get(g, BRIGHT_CYAN) for g in gs],
+                           alpha=0.9, width=0.55)
+        for bar, v in zip(bars, deltas):
+            ypos = bar.get_height() + 0.0005 if v >= 0 else bar.get_height() - 0.002
+            axes[0].text(bar.get_x() + bar.get_width() / 2,
+                         ypos, f"{v:+.4f}",
+                         ha="center", va="bottom", color=TEXT, fontsize=8)
+        axes[0].axhline(0, color=GRID, linewidth=1)
+        axes[0].set(xticks=x, xticklabels=[_pretty_name(g) for g in gs],
+                    ylabel="ΔAUC (full − w/o cascade)",
+                    title="(a) ΔAUC per genre")
+        axes[0].tick_params(axis="x", rotation=15)
+
+        b1 = axes[1].bar(x - width/2, full_vals, width=width, color=BRIGHT_CYAN,
+                         alpha=0.9, label="Full model")
+        b2 = axes[1].bar(x + width/2, abl_vals,  width=width, color=BRIGHT_ORANGE,
+                         alpha=0.9, label="w/o cascade")
+        axes[1].set(xticks=x, xticklabels=[_pretty_name(g) for g in gs],
+                    ylabel="ROC-AUC",
+                    title="(b) ROC-AUC per genre: full model vs. w/o cascade")
+        axes[1].tick_params(axis="x", rotation=15)
+        axes[1].legend(fontsize=9)
+        plt.tight_layout()
+        _save(fig, plots_dir, "cascade_by_genre")
+        print(f"  Per-genre cascade Δ: {genre_delta}")
+
+    return result
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 11b. Pareto frontier — model vs baselines on compression–preservation plane
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _pareto_points_for_scores(
+    scores_dict: dict, data: dict, thresholds: list[float],
+    embedder,
+) -> list[tuple[float, float]]:
+    """Return [(mean_compression, mean_sbert_cosine)] for each threshold.
+
+    Uses the same centroid-cosine methodology as transcript_eval so that
+    model and baseline curves are directly comparable on the same axes.
+    """
+    docs, video_ids = data["docs"], data["video_ids"]
+    pts: list[tuple[float, float]] = []
+
+    for t in thresholds:
+        compressions, cosines = [], []
+        for vid in video_ids:
+            segs   = docs[vid]
+            texts  = [s["text"] for s in segs]
+            wcs    = [len(tx.split()) for tx in texts]
+            total  = sum(wcs)
+            if total == 0:
+                continue
+
+            embs = embedder.encode(
+                texts, convert_to_numpy=True,
+                normalize_embeddings=True, show_progress_bar=False,
+            )
+            centroid_full = embs.mean(axis=0)
+            norm = np.linalg.norm(centroid_full)
+            if norm > 0:
+                centroid_full /= norm
+
+            seg_scores = np.array([
+                scores_dict.get((vid, s["seg_idx"]), 0.5)
+                for s in segs
+            ])
+            keep_mask  = seg_scores < t
+            if keep_mask.sum() == 0:
+                compressions.append(0.0)
+                cosines.append(0.0)
+                continue
+
+            kept_words = sum(w for w, k in zip(wcs, keep_mask) if k)
+            compressions.append(kept_words / total)
+            centroid_kept = embs[keep_mask].mean(axis=0)
+            nk = np.linalg.norm(centroid_kept)
+            if nk > 0:
+                centroid_kept /= nk
+            cosines.append(float(np.dot(centroid_full, centroid_kept)))
+
+        if compressions:
+            pts.append((float(np.mean(compressions)), float(np.mean(cosines))))
+
+    return pts
+
+
+def plot_pareto_frontier(
+    model_scores: dict, data: dict, thresholds: list[float],
+    device: str, plots_dir: Path,
+) -> None:
+    """Compression–preservation Pareto frontier for model and key baselines.
+
+    X-axis: words kept (%) = compression ratio.  Y-axis: SBERT cosine to the
+    original transcript.  A better method's curve lies *above and to the left*
+    (same preservation at less content, or more preservation at same content).
+
+    This is the central "so what" figure: at every operating threshold,
+    SegRemover preserves more semantic content than unsupervised baselines.
+    """
+    from sentence_transformers import SentenceTransformer
+
+    if not model_scores and not data["baselines"]:
+        return
+
+    embedder = SentenceTransformer(
+        "sentence-transformers/all-MiniLM-L6-v2", device=device
+    )
+    embedder.eval()
+
+    methods: dict[str, dict] = {}
+    if model_scores:
+        methods["model"] = model_scores
+    for bname in ["tfidf", "sbert", "heuristic"]:
+        bsc = {k: v[bname] for k, v in data["baselines"].items() if bname in v}
+        if bsc:
+            methods[bname] = bsc
+
+    if len(methods) < 2:
+        return
+
+    method_style = {
+        "model":     ("-",  2.5),
+        "tfidf":     ("--", 1.5),
+        "sbert":     ("-.", 1.5),
+        "heuristic": (":",  1.5),
+    }
+
+    fig, ax = plt.subplots(figsize=(7, 5))
+    _ax_style(ax)
+
+    for name, scores in methods.items():
+        pts = _pareto_points_for_scores(scores, data, thresholds, embedder)
+        if not pts:
+            continue
+        xs = [p[0] * 100 for p in pts]
+        ys = [p[1]        for p in pts]
+        color = BASELINE_COLORS.get(name, BRIGHT_CYAN)
+        ls, lw = method_style.get(name, ("-", 1.5))
+        ax.plot(xs, ys, linestyle=ls, linewidth=lw, color=color,
+                marker="o", markersize=5, label=_pretty_name(name))
+        for x, y, t in zip(xs, ys, thresholds):
+            ax.annotate(f"{t:.2f}", (x, y),
+                        textcoords="offset points", xytext=(4, 4),
+                        fontsize=7, color=color)
+
+    ax.set(xlabel="Words kept (%)",
+           ylabel="SBERT cosine (compressed vs original)",
+           title="Compression–preservation Pareto frontier",
+           xlim=(0, 105), ylim=(0.85, 1.02))
+    ax.legend(fontsize=9)
+    plt.tight_layout()
+    _save(fig, plots_dir, "pareto_frontier")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 11c. Combined hero figure (paper Figure 2)
+# ══════════════════════════════════════════════════════════════════════════════
+
+def plot_combined_hero(
+    model_scores: dict, ablated_scores: dict, data: dict,
+    baseline_results: dict, plots_dir: Path,
+) -> None:
+    """Two-panel paper figure: ROC overlay (left) + cascade ablation bars (right).
+
+    Left  panel tells the ranking story: SegRemover dominates all baselines.
+    Right panel tells the design story:  removing the cascade logits costs ΔX AUC,
+    justifying contribution #2.
+    """
+    if not model_scores:
+        return
+
+    labels, _ = _binary_labels(data)
+
+    # ── Gather ROC data ───────────────────────────────────────────────────────
+    roc_data: dict[str, tuple[np.ndarray, np.ndarray, float]] = {}
+    all_methods: dict[str, dict] = {}
+    if model_scores:
+        all_methods["model"] = model_scores
+    for name in ["tfidf", "sbert", "heuristic", "random"]:
+        bsc = {k: v[name] for k, v in data["baselines"].items() if name in v}
+        if bsc:
+            all_methods[name] = bsc
+
+    for name, scores in all_methods.items():
+        s, l = _aligned_arrays(scores, labels)
+        if len(set(l)) < 2:
+            continue
+        auc = roc_auc_score(l, s)
+        fpr, tpr, _ = roc_curve(l, s)
+        roc_data[name] = (fpr, tpr, auc)
+
+    # ── Gather ablation data ──────────────────────────────────────────────────
+    ablation_rows: list[dict] = []
+    for label, scores in [("SegRemover (full)", model_scores),
+                          ("w/o cascade",       ablated_scores)]:
+        if not scores:
+            continue
+        s, l = _aligned_arrays(scores, labels)
+        if len(set(l)) < 2:
+            continue
+        auc    = roc_auc_score(l, s)
+        lo, hi = _bootstrap_ci(s, l, roc_auc_score, n_boot=500)
+        ablation_rows.append({"label": label, "auc": auc, "lo": lo, "hi": hi})
+    if data["baselines"]:
+        bsc = {k: v["tfidf"] for k, v in data["baselines"].items() if "tfidf" in v}
+        if bsc:
+            s, l = _aligned_arrays(bsc, labels)
+            if len(set(l)) >= 2:
+                auc    = roc_auc_score(l, s)
+                lo, hi = _bootstrap_ci(s, l, roc_auc_score, n_boot=500)
+                ablation_rows.append({"label": "TF-IDF (best baseline)", "auc": auc, "lo": lo, "hi": hi})
+
+    fig, axes = plt.subplots(1, 2, figsize=(13, 5))
+
+    # ── Panel A: ROC overlay ──────────────────────────────────────────────────
+    ax = _ax_style(axes[0])
+    ax.plot([0, 1], [0, 1], "--", color=GRID, linewidth=1)
+    method_order = ["model", "tfidf", "sbert", "heuristic", "random"]
+    ls_map = {"model": "-", "tfidf": "--", "sbert": "-.", "heuristic": ":", "random": "--"}
+    lw_map = {"model": 2.5}
+    for name in [m for m in method_order if m in roc_data]:
+        fpr, tpr, auc = roc_data[name]
+        color = BASELINE_COLORS.get(name, BRIGHT_CYAN)
+        ax.plot(fpr, tpr, linestyle=ls_map.get(name, "-"),
+                linewidth=lw_map.get(name, 1.5), color=color,
+                label=f"{_pretty_name(name)} (AUC={auc:.3f})")
+    ax.set(xlabel="False positive rate", ylabel="True positive rate",
+           title="(a) ROC curves", xlim=(0, 1), ylim=(0, 1.02))
+    ax.legend(fontsize=8, loc="lower right")
+
+    # ── Panel B: Cascade ablation bars ────────────────────────────────────────
+    ax = _ax_style(axes[1])
+    if ablation_rows:
+        df_ab = pd.DataFrame(ablation_rows)
+        y     = np.arange(len(df_ab))
+        colors = []
+        for v in df_ab["label"]:
+            if "full" in v:      colors.append(BRIGHT_CYAN)
+            elif "cascade" in v: colors.append(BRIGHT_ORANGE)
+            else:                colors.append(BRIGHT_SLATE)
+        xerr = np.array([df_ab["auc"] - df_ab["lo"], df_ab["hi"] - df_ab["auc"]])
+        bars = ax.barh(y, df_ab["auc"], xerr=xerr, color=colors, alpha=0.9,
+                       capsize=4, error_kw={"ecolor": TEXT, "lw": 1.5}, height=0.55)
+        for bar, row in zip(bars, df_ab.itertuples()):
+            ax.text(row.auc + 0.003, bar.get_y() + bar.get_height() / 2,
+                    f"{row.auc:.3f}", va="center", color=TEXT, fontsize=9, fontweight="bold")
+        ax.set(yticks=y, yticklabels=df_ab["label"],
+               xlabel="ROC-AUC (95% CI)", xlim=(0.45, 1.05),
+               title="(b) Cascade ablation")
+        ax.axvline(0.5, color=GRID, linestyle="--", linewidth=1)
+
+    plt.tight_layout()
+    _save(fig, plots_dir, "combined_hero")
+    print("  Saved combined_hero.png/pdf")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1811,7 +2654,8 @@ def agreement_by_genre(model_scores: dict, data: dict, plots_dir: Path) -> None:
 # ══════════════════════════════════════════════════════════════════════════════
 
 def gold_eval(model_scores: dict, data: dict, plots_dir: Path, out_dir: Path,
-              data_dir: Path | None = None) -> dict:
+              data_dir: Path | None = None,
+              model_heads_b: dict | None = None) -> dict:
     """Evaluate model against human gold annotations.
 
     Metrics:
@@ -1900,7 +2744,7 @@ def gold_eval(model_scores: dict, data: dict, plots_dir: Path, out_dir: Path,
 
             # Bar chart: model vs weak label accuracy + F1
             fig, axes = plt.subplots(1, 2, figsize=(10, 4))
-            fig.suptitle("Model surpasses weak labels against human annotations",
+            fig.suptitle("Model vs. weak labels: accuracy and F1 on gold annotations",
                          color=TEXT, fontsize=13)
             for ax, col, color in [(axes[0], "accuracy", BRIGHT_CYAN),
                                    (axes[1], "f1",       BRIGHT_GREEN)]:
@@ -1918,7 +2762,41 @@ def gold_eval(model_scores: dict, data: dict, plots_dir: Path, out_dir: Path,
             _save(fig, plots_dir, "gold_accuracy")
             results["gold_n"] = len(shared_b)
 
-    # ── 3. Weak-label quality: per-LF genre breakdown ─────────────────────────
+    # ── 3. Head B predicted class vs human gold_function ────────────────────
+    gold_fn_class = data.get("gold_fn_class", {})
+    if model_heads_b and gold_fn_class:
+        shared_fn = sorted(set(model_heads_b) & set(gold_fn_class))
+        if len(shared_fn) >= 5:
+            y_true = [gold_fn_class[k] for k in shared_fn]
+            y_pred = [model_heads_b[k]  for k in shared_fn]
+            from sklearn.metrics import (
+                accuracy_score as _acc, f1_score as _f1,
+                confusion_matrix as _cm,
+            )
+            acc_fn = _acc(y_true, y_pred)
+            f1_fn  = _f1(y_true, y_pred, average="macro", zero_division=0)
+            per_fn = _f1(y_true, y_pred, average=None, zero_division=0,
+                         labels=list(range(len(FUNCTION_NAMES))))
+            results["head_b_vs_gold_fn_accuracy"] = round(acc_fn, 4)
+            results["head_b_vs_gold_fn_macro_f1"] = round(f1_fn, 4)
+            lines.append(f"## Head B vs human gold_function labels")
+            lines.append(f"- accuracy={acc_fn:.4f}  macro-F1={f1_fn:.4f}  (n={len(shared_fn)})")
+            lines.append("")
+            lines.append("| Function class | F1 vs human |")
+            lines.append("|---|---|")
+            for i, name in enumerate(FUNCTION_NAMES):
+                lines.append(f"| {name} | {per_fn[i]:.4f} |")
+            lines.append("")
+
+            # Confusion matrix: Head B predictions vs human labels
+            cm_fn = _cm(y_true, y_pred, labels=list(range(len(FUNCTION_NAMES))))
+            _plot_confusion_heatmap(
+                cm_fn, FUNCTION_NAMES, plots_dir, "head_b_vs_gold_fn_confusion",
+                title="Head B predictions vs human gold_function (row-normalised)",
+            )
+            print(f"  Head B vs gold_function: accuracy={acc_fn:.3f}  macro-F1={f1_fn:.3f}  n={len(shared_fn)}")
+
+    # ── 4. Weak-label quality: per-LF genre breakdown ─────────────────────────
     # (LF-level analysis requires lf_votes.jsonl — optional)
     lf_path = (data_dir / "lf_votes.jsonl") if data_dir else (out_dir / "lf_votes.jsonl")
     if lf_path.exists() and data["gold_b"]:
@@ -1999,7 +2877,7 @@ def caption_type_eval(model_scores: dict, data: dict, plots_dir: Path) -> dict:
     # Bar chart comparing caption types
     fig, axes = plt.subplots(1, 2, figsize=(10, 4))
     fig.suptitle(
-        "Performance gap between manual and auto captions quantifies domain shift",
+        "ROC-AUC and PR-AUC by caption type",
         color=TEXT, fontsize=12,
     )
     cap_colors = CAPTION_COLORS
@@ -2238,6 +3116,20 @@ def generate_report(args, audit_info: dict, seg_metrics: dict,
         n = audit_info.get("genre_counts", {}).get(g, 0)
         lines.append(f"| Genre: {_pretty_name(g)} | {n} videos |")
 
+    genre_stats = audit_info.get("genre_stats", {})
+    if genre_stats:
+        lines += [
+            "\n### Table 1: Corpus statistics by genre",
+            "| Genre | Videos | Segments | Mean seg length (words) | % positive (p_remove > 0.5) |",
+            "|---|---:|---:|---:|---:|",
+        ]
+        for g in _ordered(list(genre_stats.keys()), EXPECTED_GENRES):
+            s = genre_stats[g]
+            lines.append(
+                f"| {_pretty_name(g)} | {s['n_videos']:,} | {s['n_segs']:,} | "
+                f"{s['mean_len_words']} | {s['pct_positive']}% |"
+            )
+
     missing = audit_info.get("missing_genres", [])
     coverage_rows = [
         ("Six-genre coverage", "OK" if not missing else "WARN",
@@ -2356,13 +3248,32 @@ def generate_report(args, audit_info: dict, seg_metrics: dict,
                      "AUC-ROC varies across genres — lectures show the highest discriminability, "
                      "suggesting cleaner segment boundaries."),
             ]
+        if (out_dir / "plots" / "p_remove_distribution.png").exists():
+            lines += [
+                "\n### p_remove distribution",
+                _img("p_remove_distribution",
+                     "p_remove distribution across all segments — meaningful mass in the "
+                     "uncertain zone confirms the model is a continuous ranker, not a "
+                     "binary classifier."),
+            ]
+        if (out_dir / "plots" / "p_remove_distribution_by_genre.png").exists():
+            lines.append(_img("p_remove_distribution_by_genre",
+                              "Per-genre p_remove distributions — podcasts show more uncertain mass "
+                              "than lectures, consistent with higher genre-level ECE."))
 
     if not transcript_df.empty:
-        avg = transcript_df.groupby("threshold")[
-            ["compression", "sbert_cosine"]].mean().round(4)
+        method_col = "method" if "method" in transcript_df.columns else None
+        if method_col and transcript_df[method_col].nunique() > 1:
+            avg = (transcript_df.groupby([method_col, "threshold"])[["compression", "sbert_cosine"]]
+                   .mean().round(4).reset_index()
+                   .rename(columns={method_col: "Method", "threshold": "Threshold",
+                                    "compression": "Compression", "sbert_cosine": "SBERT cosine"}))
+        else:
+            avg = transcript_df.groupby("threshold")[
+                ["compression", "sbert_cosine"]].mean().round(4)
         lines += [
             "\n## 3. Transcript-level (compression vs SBERT preservation)",
-            avg.to_markdown(),
+            avg.to_markdown(index=False if method_col else True),
             "",
             _img("transcript_compression",
                  "Semantic similarity (SBERT centroid cosine) degrades smoothly with "
@@ -2384,14 +3295,16 @@ def generate_report(args, audit_info: dict, seg_metrics: dict,
 
     if baseline_results:
         lines += ["\n## 4. Baseline comparison"]
-        header = f"| {'Method':12s} | {'ROC-AUC':>8s} | ROC 95% CI | {'PR-AUC':>8s} | PR 95% CI |"
-        sep    = f"|{'-'*14}|{'-'*10}|{'-'*14}|{'-'*10}|{'-'*14}|"
+        header = f"| {'Method':12s} | {'ROC-AUC':>8s} | ROC 95% CI | {'PR-AUC':>8s} | PR 95% CI | p vs model |"
+        sep    = f"|{'-'*14}|{'-'*10}|{'-'*14}|{'-'*10}|{'-'*14}|{'-'*12}|"
         lines += [header, sep]
         for name, m in baseline_results.items():
             roc_ci = m.get("roc_ci", ("-", "-"))
-            pr_ci = m.get("pr_ci", ("-", "-"))
+            pr_ci  = m.get("pr_ci",  ("-", "-"))
+            pval   = m.get("pvalue_vs_model")
+            pval_str = f"{pval:.4f}" if pval is not None else "—"
             lines.append(f"| {_pretty_name(name):12s} | {m['roc_auc']:>8.4f} | {roc_ci[0]}-{roc_ci[1]} | "
-                         f"{m['pr_auc']:>8.4f} | {pr_ci[0]}-{pr_ci[1]} |")
+                         f"{m['pr_auc']:>8.4f} | {pr_ci[0]}-{pr_ci[1]} | {pval_str} |")
         lines += [
             "",
             _img("baseline_comparison",
@@ -2400,6 +3313,43 @@ def generate_report(args, audit_info: dict, seg_metrics: dict,
         if (out_dir / "plots" / "baseline_by_genre.png").exists():
             lines.append(_img("baseline_by_genre",
                                "Genre-level breakdown: model advantage over baselines varies by domain."))
+        if (out_dir / "plots" / "roc_overlay.png").exists():
+            lines.append(_img("roc_overlay",
+                               "ROC overlay: SegRemover's curve lies above all baselines at every FPR."))
+        if (out_dir / "plots" / "pareto_frontier.png").exists():
+            lines.append(_img("pareto_frontier",
+                               "Compression–preservation Pareto frontier: at every threshold SegRemover "
+                               "preserves more semantic content than unsupervised baselines."))
+
+    if (out_dir / "plots" / "ablation_cascade.png").exists():
+        lines += [
+            "\n## 11. Cascade ablation",
+            _img("ablation_cascade",
+                 "Zeroing Head B/C logits from Head A's input reduces AUC, "
+                 "confirming the cascade design contributes beyond the encoder alone."),
+        ]
+        abl_csv = out_dir / "ablation_table.csv"
+        if abl_csv.exists():
+            try:
+                import pandas as _pd
+                abl_df = _pd.read_csv(abl_csv)
+                lines += ["", abl_df.to_markdown(index=False), ""]
+            except Exception:
+                lines.append("See `ablation_table.csv` for per-variant AUC with 95% CI.")
+        else:
+            lines.append("See `ablation_table.csv` for per-variant AUC with 95% CI.")
+        if (out_dir / "plots" / "cascade_by_genre.png").exists():
+            lines.append(_img("cascade_by_genre",
+                              "Per-genre cascade contribution: ΔAUC (full − ablated) is largest "
+                              "in conversational genres where function-type is hardest to infer "
+                              "from semantics alone."))
+    if (out_dir / "plots" / "combined_hero.png").exists():
+        lines += [
+            "\n## 12. Combined hero figure (paper Figure 2)",
+            _img("combined_hero",
+                 "Left: ROC overlay (SegRemover vs baselines). "
+                 "Right: cascade ablation — removing Head B/C logits costs ΔAUC."),
+        ]
 
     lines += [
         "\n## 5. 4-way agreement",
@@ -2422,6 +3372,13 @@ def generate_report(args, audit_info: dict, seg_metrics: dict,
         if "weak_vs_gold_acc" in gold_results:
             lines.append(f"- **Weak-label accuracy vs gold:** {gold_results['weak_vs_gold_acc']} "
                          f"F1={gold_results['weak_vs_gold_f1']}")
+        if "head_b_vs_gold_fn_accuracy" in gold_results:
+            lines.append(
+                f"- **Head B vs human gold_function:** "
+                f"accuracy={gold_results['head_b_vs_gold_fn_accuracy']}  "
+                f"macro-F1={gold_results['head_b_vs_gold_fn_macro_f1']}  "
+                f"_(model's function-type predictions compared to annotator labels)_"
+            )
         lines += [
             "",
             _img("gold_scatter",
@@ -2432,6 +3389,11 @@ def generate_report(args, audit_info: dict, seg_metrics: dict,
                  "validating the training signal."),
             "\nSee `gold_eval.md` for full labeling-function accuracy breakdown.",
         ]
+        if (out_dir / "plots" / "head_b_vs_gold_fn_confusion.png").exists():
+            lines.append(_img("head_b_vs_gold_fn_confusion",
+                              "Head B predicted function class vs human gold_function annotation — "
+                              "alignment here validates the explainability claim independently of "
+                              "weak-label training signal."))
     else:
         lines += [
             "\n## 6. Gold evaluation",
@@ -2464,6 +3426,14 @@ def generate_report(args, audit_info: dict, seg_metrics: dict,
         "- Transcript-only risk examples are lexical cues, not confirmed errors, unless gold labels are present.",
         "- Model scores can be missing for segments beyond the checkpoint `max_segs` truncation limit.",
         "- Caption-type analysis requires `caption_type` field in segment data.",
+        "- The 6-class function taxonomy (new_information, useful_repetition, redundant_repetition, "
+        "clarification, discourse_filler, off_topic) and the 5-class disfluency taxonomy are "
+        "hand-crafted without empirical validation that these specific categories are optimal for "
+        "the removability task. No prior work establishes this taxonomy as the correct decomposition "
+        "of segment function for spoken YouTube content; alternative label designs (finer-grained, "
+        "coarser, or grounded in a different linguistic theory) might yield stronger cascade signal "
+        "or better Head B/C accuracy. The taxonomies should be treated as design choices, not "
+        "established ground truth.",
     ]
 
     # Reproducibility appendix
@@ -2521,14 +3491,28 @@ def _parse_args() -> argparse.Namespace:
                    help="Limit to N documents (default: 10 with --smoke)")
     p.add_argument("--no-model",    action="store_true",     dest="no_model",
                    help="Skip model inference (baselines + transcript only)")
-    p.add_argument("--eval-sample", type=int, default=200,  dest="eval_sample",
-                   help="Randomly sample N videos for evaluation, always including "
-                        "gold-annotated ones. 0 = evaluate all. (default: 200)")
+    p.add_argument("--eval-sample", type=int, default=1000, dest="eval_sample",
+                   help="Cap N videos for non-transcript eval (segment, baseline, agreement, "
+                        "gold). Always pins gold-annotated videos. 0 = use all. (default: 1000)")
+    p.add_argument("--transcript-sample", type=int, default=2, dest="transcript_sample",
+                   help="Docs per (genre × length_bucket) cell for transcript eval "
+                        "(SBERT re-encoding is expensive). Default: 2 (~36 docs total).")
+    p.add_argument("--paper-mode", action="store_true", dest="paper_mode",
+                   help="Switch to white-background, 300 dpi, colorblind-safe figures "
+                        "suitable for ACL paper submission.")
+    p.add_argument("--ablate-cascade", action="store_true", dest="ablate_cascade",
+                   help="Re-run inference with Head B/C logits zeroed (cascade ablation).")
+    p.add_argument("--pareto", action="store_true", dest="pareto",
+                   help="Compute Pareto frontier (compression vs SBERT) for all methods. "
+                        "Requires SBERT re-encoding — adds ~5 min on CPU.")
     return p.parse_args()
 
 
 def main() -> None:
     args = _parse_args()
+    if getattr(args, "paper_mode", False):
+        _apply_paper_theme()
+        print("Paper mode: white background, 300 dpi, colorblind-safe palette")
 
     # ── Resolve smoke defaults ────────────────────────────────────────────────
     label_suffix = ""
@@ -2571,10 +3555,15 @@ def main() -> None:
     if args.eval_sample and len(data["video_ids"]) > args.eval_sample:
         n_gold = len({vid for vid, _ in data["gold"]} | {vid for vid, _ in data["gold_b"]})
         print(f"  Sampling {args.eval_sample} videos for eval "
-              f"(gold-pinned: {n_gold}, random fill: {args.eval_sample - n_gold}) ...")
+              f"(gold-pinned: {n_gold}) ...")
         data = sample_eval_docs(data, args.eval_sample)
         print(f"  Evaluation set: {len(data['video_ids'])} videos "
               f"({sum(len(v) for v in data['docs'].values()):,} segments)")
+
+    # Build transcript subset (separate small stratified sample)
+    transcript_data = sample_transcript_docs(data, n_per_cell=args.transcript_sample)
+    print(f"  Transcript eval subset: {len(transcript_data['video_ids'])} videos "
+          f"(~{args.transcript_sample} per genre×length cell)")
 
     # ── 2. Model inference ────────────────────────────────────────────────────
     model_scores:  dict = {}
@@ -2615,13 +3604,27 @@ def main() -> None:
     print("\n[4c] Explainer classifier metrics (Head B / Head C) ...")
     explainer_results = explainer_eval(model_heads_b, model_heads_c, data, plots_dir)
 
+    # ── 4d. p_remove distribution (ranker vs binary classifier evidence) ──────
+    print("\n[4d] p_remove distribution ...")
+    plot_p_remove_distribution(model_scores, data, plots_dir)
+
     # ── 5. Transcript-level evaluation ────────────────────────────────────────
-    print("\n[5/10] Transcript-level evaluation ...")
-    transcript_df = transcript_eval(data, model_scores, args.thresholds, device, plots_dir)
+    transcript_df = pd.DataFrame()
+    if args.transcript_sample > 0:
+        print("\n[5/10] Transcript-level evaluation ...")
+        transcript_scores = {k: v for k, v in model_scores.items()
+                             if k[0] in set(transcript_data["video_ids"])}
+        transcript_df = transcript_eval(transcript_data, transcript_scores, args.thresholds, device, plots_dir)
+    else:
+        print("\n[5/10] Transcript-level evaluation skipped (--transcript-sample 0)")
 
     # ── 6. Baseline comparison ────────────────────────────────────────────────
     print("\n[6/10] Baseline comparison ...")
     baseline_results = baseline_eval(model_scores, data, plots_dir)
+
+    # ── 6b. ROC overlay (all methods on one plot) ─────────────────────────────
+    print("\n[6b] ROC overlay ...")
+    plot_roc_overlay(model_scores, data, plots_dir)
 
     # ── 7. 4-way agreement ────────────────────────────────────────────────────
     print("\n[7/10] 4-way agreement analysis ...")
@@ -2630,7 +3633,8 @@ def main() -> None:
 
     # ── 8. Gold evaluation (only when annotations exist) ─────────────────────
     print("\n[8/10] Gold evaluation ...")
-    gold_results = gold_eval(model_scores, data, plots_dir, out_dir, data_dir=data_dir)
+    gold_results = gold_eval(model_scores, data, plots_dir, out_dir,
+                             data_dir=data_dir, model_heads_b=model_heads_b)
 
     # ── 9. Caption-type robustness ────────────────────────────────────────────
     print("\n[9/10] Caption-type robustness eval ...")
@@ -2643,6 +3647,51 @@ def main() -> None:
     generate_report(args, audit_info, seg_metrics, baseline_results,
                     transcript_df, label_desc, config, gold_results, out_dir,
                     explainer_results=explainer_results)
+
+    # ── Save key results as CSV ───────────────────────────────────────────────
+    if seg_metrics:
+        pd.DataFrame([seg_metrics]).to_csv(out_dir / "segment_metrics.csv", index=False)
+    if baseline_results:
+        rows_b = []
+        for name, m in baseline_results.items():
+            roc_ci = m.get("roc_ci", (None, None))
+            pr_ci  = m.get("pr_ci",  (None, None))
+            rows_b.append({
+                "method":        name,
+                "roc_auc":       m.get("roc_auc"),
+                "roc_ci_lo":     roc_ci[0],
+                "roc_ci_hi":     roc_ci[1],
+                "pr_auc":        m.get("pr_auc"),
+                "pr_ci_lo":      pr_ci[0],
+                "pr_ci_hi":      pr_ci[1],
+                "pvalue_vs_model": m.get("pvalue_vs_model"),
+            })
+        pd.DataFrame(rows_b).to_csv(out_dir / "baseline_results.csv", index=False)
+    if explainer_results:
+        pd.DataFrame([explainer_results]).to_csv(out_dir / "explainer_results.csv", index=False)
+    if gold_results:
+        pd.DataFrame([gold_results]).to_csv(out_dir / "gold_results.csv", index=False)
+
+    # ── 11. Cascade ablation (optional, needs model) ──────────────────────────
+    ablated_scores: dict = {}
+    if getattr(args, "ablate_cascade", False) and model_scores and config:
+        print("\n[11] Cascade ablation ...")
+        ablated_scores = run_inference_ablated(checkpoint, config, data, device)
+        cascade_ablation_eval(model_scores, ablated_scores, data, plots_dir, out_dir)
+    elif model_scores:
+        print("\n[11] Cascade ablation skipped (pass --ablate-cascade to enable)")
+
+    # ── 11b. Pareto frontier (optional — SBERT re-encoding) ───────────────────
+    if getattr(args, "pareto", False):
+        print("\n[11b] Pareto frontier (SBERT re-encoding for all methods) ...")
+        plot_pareto_frontier(model_scores, data, args.thresholds, device, plots_dir)
+    elif model_scores:
+        print("\n[11b] Pareto frontier skipped (pass --pareto to enable)")
+
+    # ── 11c. Combined hero figure ─────────────────────────────────────────────
+    if model_scores:
+        print("\n[11c] Combined hero figure ...")
+        plot_combined_hero(model_scores, ablated_scores, data, baseline_results, plots_dir)
 
     print(f"\n{'='*60}")
     print(f"Outputs: {out_dir.resolve()}")

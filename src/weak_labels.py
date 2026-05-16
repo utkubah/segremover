@@ -56,7 +56,8 @@ FUNCTION_USEFUL_REP_CLASS  = 1
 FUNCTION_CLARIFICATION_CLASS = 3
 
 # Disfluency label class indices that map to REMOVE for Head A
-DISFLUENCY_REMOVE_CLASSES = {1, 2, 3, 4}  # filled_pause, repetition, revision, restart
+DISFLUENCY_REMOVE_CLASSES = {1, 2}  # filled_pause, repetition
+DISFLUENCY_KEEP_CLASSES   = {3}     # revision — carries the speaker's corrected intended content
 
 # Snorkel label constants
 ABSTAIN = -1
@@ -263,7 +264,7 @@ def main() -> None:
         lf_names += ["LF_function_remove", "LF_function_new_info",
                      "LF_function_useful_rep", "LF_function_clarification"]
     if use_disfluency:
-        lf_names.append("LF_disfluency_remove")
+        lf_names.append("LF_disfluency")
 
     all_segs: list[dict] = []
     all_votes: list[list[int]] = []
@@ -282,25 +283,42 @@ def main() -> None:
 
         for i, seg in enumerate(segs):
             text = seg["text"]
+            key  = (seg["video_id"], seg["seg_idx"])
+
+            # Look up function label early so we can veto conflicting LFs below.
+            fn_label = function_labels.get(key, -99) if use_function else -99
+
+            # LF_repetition fires REMOVE on cosine similarity alone and cannot
+            # distinguish useful from harmful repetition. When the function
+            # classifier explicitly labels a segment as useful_repetition we
+            # have richer signal, so the heuristic should abstain.
+            effective_rep_vote = (
+                ABSTAIN if fn_label == FUNCTION_USEFUL_REP_CLASS else rep_votes[i]
+            )
+
             votes = [
                 lf_filler(text),
-                rep_votes[i],
+                effective_rep_vote,
                 lf_short(text),
                 tfidf_votes[i],
                 lf_named_entity(text, nlp),
                 lf_question_or_def(text),
             ]
             if use_summary_align:
-                votes.append(summary_align.get((seg["video_id"], seg["seg_idx"]), ABSTAIN))
+                votes.append(summary_align.get(key, ABSTAIN))
             if use_function:
-                fn_label = function_labels.get((seg["video_id"], seg["seg_idx"]), -99)
                 votes.append(REMOVE if fn_label in FUNCTION_REMOVE_CLASSES    else ABSTAIN)
                 votes.append(KEEP   if fn_label == FUNCTION_NEW_INFO_CLASS    else ABSTAIN)
                 votes.append(KEEP   if fn_label == FUNCTION_USEFUL_REP_CLASS  else ABSTAIN)
                 votes.append(KEEP   if fn_label == FUNCTION_CLARIFICATION_CLASS else ABSTAIN)
             if use_disfluency:
                 ds_label = disfluency_labels.get((seg["video_id"], seg["seg_idx"]), -99)
-                votes.append(REMOVE if ds_label in DISFLUENCY_REMOVE_CLASSES else ABSTAIN)
+                if ds_label in DISFLUENCY_REMOVE_CLASSES:
+                    votes.append(REMOVE)
+                elif ds_label in DISFLUENCY_KEEP_CLASSES:
+                    votes.append(KEEP)
+                else:
+                    votes.append(ABSTAIN)
             all_segs.append(seg)
             all_votes.append(votes)
 

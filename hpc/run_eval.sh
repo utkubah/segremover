@@ -50,11 +50,14 @@ echo "  Output dir: eval/"
 echo "================================================================"
 
 python src/eval.py \
-    --checkpoint  models/best.pt \
-    --data-dir    data/processed \
-    --output-dir  eval \
-    --eval-sample 100 \
-    --thresholds  0.50 0.60 0.70 0.80 0.90 0.95 \
+    --checkpoint        models/best.pt \
+    --data-dir          data/processed \
+    --output-dir        eval \
+    --transcript-sample 2 \
+    --thresholds        0.50 0.60 0.70 0.80 0.90 0.95 \
+    --paper-mode \
+    --ablate-cascade \
+    --pareto \
     "$@"
 
 echo "================================================================"

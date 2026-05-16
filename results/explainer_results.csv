@@ -1,0 +1,2 @@
+head_b_accuracy,head_b_macro_f1,head_b_f1_new_information,head_b_f1_useful_repetition,head_b_f1_redundant_repetition,head_b_f1_clarification,head_b_f1_discourse_filler,head_b_f1_off_topic,head_c_accuracy,head_c_macro_f1,head_c_f1_clean,head_c_f1_filled_pause,head_c_f1_repetition,head_c_f1_revision,head_c_f1_restart
+0.5225,0.3798,0.6914,0.2718,0.2013,0.2742,0.441,0.3989,0.9617,0.9627,0.9762,0.9778,0.8772,0.9825,1.0

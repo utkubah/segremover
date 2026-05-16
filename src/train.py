@@ -262,7 +262,8 @@ class SegRemover(nn.Module):
             parts.append(out.last_hidden_state[:, 0])  # [CLS]
         return torch.cat(parts, dim=0)
 
-    def forward(self, input_ids, attention_mask, doc_lengths, seg_batch: int = 32):
+    def forward(self, input_ids, attention_mask, doc_lengths, seg_batch: int = 32,
+                ablate_cascade: bool = False):
         # Stage 1 — one [CLS] embedding per segment
         cls_embs = self._encode_segments(input_ids, attention_mask, seg_batch)  # (N, d)
 
@@ -291,7 +292,9 @@ class SegRemover(nn.Module):
         # Explainer heads run first; ranker head is conditioned on their outputs
         logit_b = self.head_b(segs_ctx)                              # (N, 6)
         logit_c = self.head_c(segs_ctx)                              # (N, 5)
-        combined = torch.cat([segs_ctx, logit_b, logit_c], dim=-1)   # (N, d+11)
+        b_in = torch.zeros_like(logit_b) if ablate_cascade else logit_b
+        c_in = torch.zeros_like(logit_c) if ablate_cascade else logit_c
+        combined = torch.cat([segs_ctx, b_in, c_in], dim=-1)         # (N, d+11)
         logit_a  = self.head_a(combined).squeeze(-1)                 # (N,)
         return logit_a, logit_b, logit_c
 

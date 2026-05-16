@@ -1,0 +1,2 @@
+roc_auc,pr_auc,ece,f1_at_0.5,precision_at_0.5,recall_at_0.5,accuracy_at_0.5,roc_auc_ci,genre_auc
+0.8638,0.8213,0.0528,0.752,0.7234,0.7829,0.7888,"(0.8449, 0.882)","{'commentary': {'auc': 0.8298, 'ci_lo': 0.787, 'ci_hi': 0.8641}, 'entertainment': {'auc': 0.8781, 'ci_lo': 0.8141, 'ci_hi': 0.9361}, 'lectures': {'auc': 0.8586, 'ci_lo': 0.7842, 'ci_hi': 0.9205}, 'podcasts': {'auc': 0.903, 'ci_lo': 0.8679, 'ci_hi': 0.9356}, 'ted': {'auc': 0.8887, 'ci_lo': 0.8317, 'ci_hi': 0.9347}, 'tv_series': {'auc': 0.8167, 'ci_lo': 0.7694, 'ci_hi': 0.8639}}"
