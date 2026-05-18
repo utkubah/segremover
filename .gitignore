@@ -13,7 +13,6 @@ models/
 
 # Misc local dirs
 stats/
-HANDOFF.md
 
 # Python
 __pycache__/
