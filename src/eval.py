@@ -437,13 +437,21 @@ def load_all_data(data_dir: Path, max_docs: int | None = None,
     gold:         dict[tuple, float] = {}   # soft target from gold_removability ordinal
     gold_b:       dict[tuple, int]   = {}   # binary remove/keep from gold_function
     gold_fn_class: dict[tuple, int]  = {}   # raw 6-class gold_function index (for Head B validation)
+    def _has_json(p: Path) -> bool:
+        return p.is_dir() and any(p.glob("*.json"))
+
     gold_dir = data_dir.parent / "gold" / "videos"
-    if not gold_dir.exists():
-        gold_dir = data_dir.parent / "gold"   # fallback: flat gold/ directory
+    if not _has_json(gold_dir):
+        gold_dir = data_dir.parent / "gold" / "by_video"
+    if not _has_json(gold_dir):
+        gold_dir = data_dir.parent / "gold"
 
     gold_entries: list[dict] = []
+    print(f"  Gold dir: {gold_dir.resolve()}  (exists={gold_dir.exists()})")
     if gold_dir.exists():
-        for json_file in sorted(gold_dir.glob("*.json")):
+        json_files = sorted(gold_dir.glob("*.json"))
+        print(f"  Gold files found: {len(json_files)}")
+        for json_file in json_files:
             try:
                 payload = json.loads(json_file.read_text(encoding="utf-8"))
                 if isinstance(payload, list):
@@ -453,13 +461,14 @@ def load_all_data(data_dir: Path, max_docs: int | None = None,
             except Exception as e:
                 print(f"  ⚠  Could not read gold file {json_file.name}: {e}")
 
+    in_scope_vids: set[str] = set(video_ids)
     for entry in gold_entries:
+        if entry.get("video_id") not in in_scope_vids:
+            continue
         rmap = entry.get("removability_to_soft_target", {})
         fmap = entry.get("function_to_binary_remove", {})
         for seg in entry.get("segments", []):
             k = (entry["video_id"], seg["seg_idx"])
-            if k not in in_scope:
-                continue
             if seg.get("gold_removability") is not None:
                 gold[k] = float(rmap.get(seg["gold_removability"], 0.5))
             if seg.get("gold_function") is not None:
@@ -468,11 +477,14 @@ def load_all_data(data_dir: Path, max_docs: int | None = None,
                 if fn_str in FUNCTION_NAMES:
                     gold_fn_class[k] = FUNCTION_NAMES.index(fn_str)
 
+    gold_vids: set[str] = {vid for vid, _ in gold} | {vid for vid, _ in gold_b}
+
     return dict(
         docs=docs, video_ids=video_ids, genre=genre, length_bucket=length_bucket,
         caption_type=caption_type,
         weak=weak, fn=fn, disfl=disfl, baselines=baselines,
         gold=gold, gold_b=gold_b, gold_fn_class=gold_fn_class, summary=summary,
+        gold_vids=gold_vids,
     )
 
 
@@ -499,6 +511,7 @@ def _subset_data(data: dict, sampled: list) -> dict:
         gold=_seg(data["gold"]),
         gold_b=_seg(data["gold_b"]),
         gold_fn_class=_seg(data.get("gold_fn_class", {})),
+        gold_vids=data.get("gold_vids", set()),
         summary=data["summary"],
     )
 
@@ -620,11 +633,12 @@ def run_inference(checkpoint: Path, config: dict, data: dict, device: str) -> di
         config["encoder"],
         config.get("inter_layers", 2),
         config.get("dropout", 0.1),
+        no_doc_context=config.get("no_doc_context", False),
     )
     model.load_state_dict(torch.load(checkpoint, map_location=device, weights_only=True))
     model.to(device).eval()
     print(f"  Loaded checkpoint  {checkpoint}")
-    print(f"  Temperature T={T}  encoder={config['encoder']}")
+    print(f"  Temperature T={T}  encoder={config['encoder']}  no_doc_context={config.get('no_doc_context', False)}")
 
     # Build doc_list in DocDataset format (dummy labels — only text matters)
     doc_list = [
@@ -731,6 +745,71 @@ def run_inference_ablated(
             doc_cursor += 1
 
     print(f"  Ablated: scored {len(scores):,} segments (cascade zeroed)")
+    return scores
+
+
+def run_inference_no_doc(
+    checkpoint: Path, config: dict, data: dict, device: str,
+) -> dict[tuple, float]:
+    """Run inference with the no-doc-context checkpoint (no inter-segment Transformer).
+
+    Loads the checkpoint with no_doc_context=True (read from its config) and
+    scores every in-scope segment.  Used for the ablation table row.
+    """
+    import torch
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from train import SegRemover, DocDataset, collate_fn   # type: ignore
+    from transformers import AutoTokenizer
+    from torch.utils.data import DataLoader
+
+    T         = float(config.get("temperature", 1.0))
+    max_segs  = int(config.get("max_segs", 256))
+    max_tok   = int(config.get("max_tok", 512))
+    seg_batch = int(config.get("seg_batch", 32))
+    docs, video_ids = data["docs"], data["video_ids"]
+
+    tokenizer = AutoTokenizer.from_pretrained(config["encoder"])
+    model = SegRemover(
+        config["encoder"],
+        config.get("inter_layers", 4),
+        config.get("dropout", 0.1),
+        no_doc_context=True,
+    )
+    model.load_state_dict(torch.load(checkpoint, map_location=device, weights_only=True))
+    model.to(device).eval()
+
+    doc_list = [
+        {"video_id": v, "genre": data["genre"][v],
+         "segments": [{"seg_idx": s["seg_idx"], "text": s["text"],
+                       "p_remove": 0.5, "fn_label": 0, "disfl_label": 0}
+                      for s in docs[v]]}
+        for v in video_ids
+    ]
+    ds     = DocDataset(doc_list, tokenizer, max_tok, max_segs)
+    loader = DataLoader(ds, batch_size=4, shuffle=False,
+                        collate_fn=collate_fn, num_workers=0)
+
+    scores: dict[tuple, float] = {}
+    doc_cursor = 0
+    for batch in tqdm(loader, desc="no-doc inference"):
+        with torch.no_grad():
+            la, _, _ = model(
+                batch["input_ids"].to(device),
+                batch["attention_mask"].to(device),
+                batch["doc_lengths"],
+                seg_batch=seg_batch,
+            )
+        probs   = torch.sigmoid(la / T).cpu().tolist()
+        seg_ptr = 0
+        for i, L in enumerate(batch["doc_lengths"]):
+            vid = video_ids[doc_cursor]
+            for j in range(L):
+                key = (vid, docs[vid][j]["seg_idx"])
+                scores[key] = round(probs[seg_ptr + j], 4)
+            seg_ptr   += L
+            doc_cursor += 1
+
+    print(f"  No-doc: scored {len(scores):,} segments (no inter-segment Transformer)")
     return scores
 
 
@@ -853,7 +932,9 @@ def _binary_labels(data: dict, source: str = "weak") -> tuple[dict, str]:
         labels = {k: int(v >= 0.5) for k, v in data["gold"].items()}
         desc   = "gold labels (human-annotated)"
     else:
-        labels = {k: int(v > 0.5) for k, v in data["weak"].items()}
+        gold_vids = data.get("gold_vids", set())
+        labels = {k: int(v > 0.5) for k, v in data["weak"].items()
+                  if k[0] not in gold_vids}
         desc   = "weak labels (proxy — not human-annotated)"
 
     return labels, desc
@@ -2154,21 +2235,23 @@ def plot_p_remove_distribution(model_scores: dict, data: dict, plots_dir: Path) 
 def cascade_ablation_eval(
     model_scores: dict, ablated_scores: dict, data: dict,
     plots_dir: Path, out_dir: Path,
+    no_doc_scores: dict | None = None,
 ) -> dict:
-    """Compare full model vs cascade-ablated model (logit_B = logit_C = 0).
+    """Compare full model vs cascade-ablated and vs no-doc-context variant.
 
     Produces:
     - ablation_table.csv  — per-method AUC with CI
     - ablation_cascade.png — horizontal bar chart, clearly showing Δ
     """
-    if not model_scores or not ablated_scores:
+    if not model_scores:
         return {}
 
     labels, label_desc = _binary_labels(data)
-    variants = {
-        "SegRemover (full)":     model_scores,
-        "w/o cascade":           ablated_scores,
-    }
+    variants: dict[str, dict] = {"SegRemover (full)": model_scores}
+    if ablated_scores:
+        variants["w/o cascade"] = ablated_scores
+    if no_doc_scores:
+        variants["w/o inter-seg Transformer"] = no_doc_scores
     rows = []
     for label, scores in variants.items():
         s, l = _aligned_arrays(scores, labels)
@@ -2220,6 +2303,8 @@ def cascade_ablation_eval(
             colors.append(BRIGHT_CYAN)
         elif "cascade" in v:
             colors.append(BRIGHT_ORANGE)
+        elif "Transformer" in v:
+            colors.append(BRIGHT_PURPLE)
         else:
             colors.append(BRIGHT_SLATE)
 
@@ -2673,39 +2758,68 @@ def gold_eval(model_scores: dict, data: dict, plots_dir: Path, out_dir: Path,
     results: dict = {}
     lines   = ["# Gold Evaluation\n"]
 
-    # ── 1. Spearman ρ: p_remove vs gold soft target ──────────────────────────
-    if data["gold"] and model_scores:
-        shared = sorted(set(model_scores) & set(data["gold"]))
-        if len(shared) >= 5:
-            pred_soft = np.array([model_scores[k]  for k in shared])
+    # ── 1. Spearman ρ: all methods vs gold soft target ───────────────────────
+    if data["gold"]:
+        gold_keys = set(data["gold"])
+
+        # Collect (name, scores_dict) for model + all baselines
+        method_scores: list[tuple[str, dict]] = []
+        if model_scores:
+            method_scores.append(("SegRemover", model_scores))
+        for bname in ["tfidf", "sbert", "heuristic", "random"]:
+            bscores = {k: v[bname] for k, v in data["baselines"].items() if bname in v}
+            if bscores:
+                method_scores.append((bname, bscores))
+
+        rho_rows = []
+        for mname, mscores in method_scores:
+            shared = sorted(set(mscores) & gold_keys)
+            if len(shared) < 5:
+                continue
+            pred_soft = np.array([mscores[k]       for k in shared])
             gold_soft = np.array([data["gold"][k]   for k in shared])
             rho, pval = spearmanr(pred_soft, gold_soft)
-            results["spearman_rho"] = round(rho, 4)
-            results["spearman_pval"] = round(pval, 4)
-            lines.append(f"## Spearman ρ (model p_remove vs gold soft target)")
-            lines.append(f"- ρ = {rho:.4f}  (p = {pval:.4f}, n = {len(shared)})")
-            lines.append("")
-
-            # NDCG@20
             ndcg = _ndcg_at_k(pred_soft, gold_soft, k=min(20, len(shared)))
-            results["ndcg_at_20"] = round(ndcg, 4)
-            lines.append(f"## NDCG@20 (ranking quality)")
-            lines.append(f"- NDCG@20 = {ndcg:.4f}")
+            rho_rows.append({"method": mname, "ρ": round(rho, 4),
+                             "p-value": round(pval, 4), "NDCG@20": round(ndcg, 4),
+                             "n": len(shared)})
+            if mname == "SegRemover":
+                results["spearman_rho"]  = round(rho, 4)
+                results["spearman_pval"] = round(pval, 4)
+                results["ndcg_at_20"]    = round(ndcg, 4)
+                # Scatter plot for model only
+                fig, ax = plt.subplots(figsize=(6, 6))
+                _ax_style(ax)
+                ax.scatter(gold_soft, pred_soft, color=BLUE, alpha=0.5, s=25)
+                ax.plot([0, 1], [0, 1], "--", color=GRID, linewidth=1)
+                ax.set(xlabel="Gold soft target", ylabel="Model p_remove",
+                       xlim=(0, 1), ylim=(0, 1),
+                       title=f"Model rank correlates with human judgement  (ρ={rho:.3f})")
+                ax.text(0.05, 0.92, f"Spearman ρ = {rho:.3f}", transform=ax.transAxes,
+                        color=BRIGHT_ORANGE, fontsize=12, fontweight="bold")
+                plt.tight_layout()
+                _save(fig, plots_dir, "gold_scatter")
+
+        if rho_rows:
+            lines.append("## Spearman ρ and NDCG@20 vs gold soft target (all methods)")
+            lines.append(pd.DataFrame(rho_rows).to_markdown(index=False))
             lines.append("")
 
-            # Scatter plot: model p_remove vs gold soft
-            fig, ax = plt.subplots(figsize=(6, 6))
+            # Bar chart: ρ for all methods
+            df_rho = pd.DataFrame(rho_rows)
+            colors = [BRIGHT_CYAN if r["method"] == "SegRemover" else BRIGHT_SLATE
+                      for _, r in df_rho.iterrows()]
+            fig, ax = plt.subplots(figsize=(8, 4))
             _ax_style(ax)
-            ax.scatter(gold_soft, pred_soft, color=BLUE, alpha=0.5, s=25)
-            ax.plot([0, 1], [0, 1], "--", color=GRID, linewidth=1)
-            ax.set(xlabel="Gold soft target", ylabel="Model p_remove",
-                   xlim=(0, 1), ylim=(0, 1),
-                   title=f"Model rank correlates with human judgement  (ρ={rho:.3f})")
-            # Annotate with ρ
-            ax.text(0.05, 0.92, f"Spearman ρ = {rho:.3f}", transform=ax.transAxes,
-                    color=BRIGHT_ORANGE, fontsize=12, fontweight="bold")
+            bars = ax.bar(df_rho["method"], df_rho["ρ"], color=colors, alpha=0.85)
+            for bar, v in zip(bars, df_rho["ρ"]):
+                ax.text(bar.get_x() + bar.get_width() / 2,
+                        bar.get_height() + 0.01,
+                        f"{v:.3f}", ha="center", va="bottom", color=TEXT, fontsize=10)
+            ax.set(ylim=(0, 1), ylabel="Spearman ρ",
+                   title="Spearman ρ vs human gold soft target")
             plt.tight_layout()
-            _save(fig, plots_dir, "gold_scatter")
+            _save(fig, plots_dir, "gold_rho_comparison")
 
     # ── 2. Binary accuracy: model and weak labels vs gold_b ──────────────────
     if data["gold_b"]:
@@ -2735,6 +2849,23 @@ def gold_eval(model_scores: dict, data: dict, plots_dir: Path, out_dir: Path,
                     f1    = f1_score(gold_b_arr, preds, zero_division=0)
                     rows.append({"method": f"model @t={thr}", "accuracy": round(acc, 4),
                                  "f1": round(f1, 4), "n": len(model_shared)})
+
+        # Baselines vs gold_b
+        for bname in ["tfidf", "sbert", "heuristic", "random"]:
+            bscores = {k: v[bname] for k, v in data["baselines"].items()
+                       if bname in v and k in set(data["gold_b"])}
+            if not bscores:
+                continue
+            bkeys   = sorted(bscores)
+            b_pred  = np.array([bscores[k]          for k in bkeys])
+            b_gold  = np.array([data["gold_b"][k]   for k in bkeys])
+            # Baselines are continuous scores — threshold at median for binary
+            thr = float(np.median(b_pred))
+            preds = (b_pred >= thr).astype(int)
+            acc  = accuracy_score(b_gold, preds)
+            f1   = f1_score(b_gold, preds, zero_division=0)
+            rows.append({"method": bname, "accuracy": round(acc, 4),
+                         "f1": round(f1, 4), "n": len(bkeys)})
 
         if rows:
             df_gold = pd.DataFrame(rows)
@@ -3491,9 +3622,12 @@ def _parse_args() -> argparse.Namespace:
                    help="Limit to N documents (default: 10 with --smoke)")
     p.add_argument("--no-model",    action="store_true",     dest="no_model",
                    help="Skip model inference (baselines + transcript only)")
-    p.add_argument("--eval-sample", type=int, default=1000, dest="eval_sample",
+    p.add_argument("--eval-sample", type=int, default=0, dest="eval_sample",
                    help="Cap N videos for non-transcript eval (segment, baseline, agreement, "
-                        "gold). Always pins gold-annotated videos. 0 = use all. (default: 1000)")
+                        "gold). Always pins gold-annotated videos. 0 = use all. (default: 0)")
+    p.add_argument("--split-file", default=None, dest="split_file",
+                   help="JSON file of test video IDs written by train.py (models/test_ids.json). "
+                        "When provided, eval is restricted to exactly those videos.")
     p.add_argument("--transcript-sample", type=int, default=2, dest="transcript_sample",
                    help="Docs per (genre × length_bucket) cell for transcript eval "
                         "(SBERT re-encoding is expensive). Default: 2 (~36 docs total).")
@@ -3502,6 +3636,9 @@ def _parse_args() -> argparse.Namespace:
                         "suitable for ACL paper submission.")
     p.add_argument("--ablate-cascade", action="store_true", dest="ablate_cascade",
                    help="Re-run inference with Head B/C logits zeroed (cascade ablation).")
+    p.add_argument("--ablate-no-doc", default=None, dest="ablate_no_doc",
+                   help="Path to no-doc-context checkpoint (trained with --no-doc-context). "
+                        "Adds a third row to the ablation table.")
     p.add_argument("--pareto", action="store_true", dest="pareto",
                    help="Compute Pareto frontier (compression vs SBERT) for all methods. "
                         "Requires SBERT re-encoding — adds ~5 min on CPU.")
@@ -3552,6 +3689,19 @@ def main() -> None:
     print(f"  Loaded {len(data['video_ids']):,} videos "
           f"({sum(len(v) for v in data['docs'].values()):,} segments)")
 
+    # Filter to held-out test split saved by train.py.
+    if getattr(args, "split_file", None):
+        import json as _json
+        test_ids = set(_json.loads(Path(args.split_file).read_text()))
+        available = set(data["video_ids"])
+        keep = sorted(available & test_ids)
+        if not keep:
+            print(f"  WARNING: split_file {args.split_file} matched 0 loaded videos — ignoring filter")
+        else:
+            data = _subset_data(data, keep)
+            print(f"  Split file: restricted to {len(keep)} test videos "
+                  f"({sum(len(v) for v in data['docs'].values()):,} segments)")
+
     if args.eval_sample and len(data["video_ids"]) > args.eval_sample:
         n_gold = len({vid for vid, _ in data["gold"]} | {vid for vid, _ in data["gold_b"]})
         print(f"  Sampling {args.eval_sample} videos for eval "
@@ -3570,7 +3720,12 @@ def main() -> None:
     model_heads_b: dict = {}
     model_heads_c: dict = {}
     config: dict | None = None
-    config_path = models_dir / "config.json"
+    # derive config filename from checkpoint suffix (e.g. best_no_doc.pt → config_no_doc.json)
+    ckpt_stem   = checkpoint.stem           # "best" or "best_no_doc"
+    cfg_suffix  = ckpt_stem[len("best"):]   # "" or "_no_doc"
+    config_path = models_dir / f"config{cfg_suffix}.json"
+    if not config_path.exists():
+        config_path = models_dir / "config.json"   # fallback for legacy checkpoints
     if config_path.exists():
         config = json.loads(config_path.read_text())
 
@@ -3672,14 +3827,38 @@ def main() -> None:
     if gold_results:
         pd.DataFrame([gold_results]).to_csv(out_dir / "gold_results.csv", index=False)
 
-    # ── 11. Cascade ablation (optional, needs model) ──────────────────────────
-    ablated_scores: dict = {}
-    if getattr(args, "ablate_cascade", False) and model_scores and config:
-        print("\n[11] Cascade ablation ...")
-        ablated_scores = run_inference_ablated(checkpoint, config, data, device)
-        cascade_ablation_eval(model_scores, ablated_scores, data, plots_dir, out_dir)
+    # ── 11. Ablation table (cascade + no-doc-context) ────────────────────────
+    ablated_scores:  dict = {}
+    no_doc_scores:   dict = {}
+
+    if model_scores and config:
+        if getattr(args, "ablate_cascade", False):
+            print("\n[11] Cascade ablation (zeroing Head B/C logits) ...")
+            ablated_scores = run_inference_ablated(checkpoint, config, data, device)
+        else:
+            print("\n[11] Cascade ablation skipped (pass --ablate-cascade to enable)")
+
+        no_doc_ckpt_arg = getattr(args, "ablate_no_doc", None)
+        if no_doc_ckpt_arg:
+            no_doc_ckpt = Path(no_doc_ckpt_arg)
+            # load the no-doc config (config_no_doc.json next to the checkpoint)
+            nd_stem      = no_doc_ckpt.stem
+            nd_suffix    = nd_stem[len("best"):]
+            nd_cfg_path  = Path(args.models_dir) / f"config{nd_suffix}.json"
+            if not nd_cfg_path.exists():
+                nd_cfg_path = Path(args.models_dir) / "config.json"
+            if no_doc_ckpt.exists() and nd_cfg_path.exists():
+                print("\n[11b] No-doc-context ablation ...")
+                nd_config = json.loads(nd_cfg_path.read_text())
+                no_doc_scores = run_inference_no_doc(no_doc_ckpt, nd_config, data, device)
+            else:
+                print(f"\n[11b] No-doc checkpoint not found at {no_doc_ckpt} — skipping")
+
+        if ablated_scores or no_doc_scores:
+            cascade_ablation_eval(model_scores, ablated_scores, data, plots_dir, out_dir,
+                                  no_doc_scores=no_doc_scores)
     elif model_scores:
-        print("\n[11] Cascade ablation skipped (pass --ablate-cascade to enable)")
+        print("\n[11] Ablation skipped (no config)")
 
     # ── 11b. Pareto frontier (optional — SBERT re-encoding) ───────────────────
     if getattr(args, "pareto", False):

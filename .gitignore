@@ -1,7 +1,4 @@
-# Claude
-.claude/
-
-# Data (large, not for version control)
+# Data (large files not for version control)
 data/
 !data/gold/
 !data/gold/videos/
@@ -11,15 +8,12 @@ data/
 logs/
 !logs/.gitkeep
 
-/eval
-/outputs
-/HANDOFF.md
-/baseline_by_genre_plots
-/eval_key_plots
-/transcript_plots
-
-# Models
+# Models (too large)
 models/
+
+# Misc local dirs
+stats/
+HANDOFF.md
 
 # Python
 __pycache__/

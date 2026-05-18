@@ -1,2 +1,2 @@
 spearman_rho,spearman_pval,ndcg_at_20,weak_vs_gold_acc,weak_vs_gold_f1,gold_n,head_b_vs_gold_fn_accuracy,head_b_vs_gold_fn_macro_f1
-0.5202,0.0,0.8439,0.7995,0.6719,414,0.477,0.2406
+0.5117,0.0,0.8516,0.7496,0.5677,1989,0.4507,0.2482

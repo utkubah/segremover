@@ -117,22 +117,28 @@ def load_docs(max_docs=None):
     return docs
 
 
-def train_dev_split(docs, dev_frac=0.2):
-    """Genre-stratified split by video_id."""
+def train_dev_test_split(docs, dev_frac=0.1, test_frac=0.1):
+    """Genre-stratified 3-way split by video_id.
+
+    Returns (train_docs, dev_docs, test_docs).  With the default fracs on
+    ~5 000 videos: 4 000 train / 500 dev / 500 test — matching the paper.
+    """
     by_genre: dict[str, list] = defaultdict(list)
     for d in docs:
         by_genre[d["genre"]].append(d)
 
-    train_docs, dev_docs = [], []
+    train_docs, dev_docs, test_docs = [], [], []
     for lst in by_genre.values():
-        if len(lst) < 2:
-            # Only one doc for this genre — put it in training, skip dev
+        n = len(lst)
+        if n < 3:
             train_docs.extend(lst)
             continue
-        n_dev = max(1, int(len(lst) * dev_frac))
-        dev_docs.extend(lst[:n_dev])
-        train_docs.extend(lst[n_dev:])
-    return train_docs, dev_docs
+        n_test = max(1, int(n * test_frac))
+        n_dev  = max(1, int(n * dev_frac))
+        test_docs.extend(lst[:n_test])
+        dev_docs.extend(lst[n_test:n_test + n_dev])
+        train_docs.extend(lst[n_test + n_dev:])
+    return train_docs, dev_docs, test_docs
 
 
 # ── Dataset ───────────────────────────────────────────────────────────────────
@@ -222,7 +228,8 @@ class SegRemover(nn.Module):
 
     def __init__(self, encoder_name: str = "roberta-base",
                  n_inter_layers: int = 2, dropout: float = 0.1,
-                 grad_checkpoint: bool = False):
+                 grad_checkpoint: bool = False,
+                 no_doc_context: bool = False):
         super().__init__()
         self.encoder = RobertaModel.from_pretrained(encoder_name)
         if grad_checkpoint:
@@ -231,6 +238,7 @@ class SegRemover(nn.Module):
             self.encoder.gradient_checkpointing_enable()
         d = self.encoder.config.hidden_size  # 768 (base) or 1024 (large)
 
+        self.no_doc_context = no_doc_context
         self.pos_emb = nn.Embedding(MAX_POS, d)
 
         enc_layer = nn.TransformerEncoderLayer(
@@ -267,27 +275,32 @@ class SegRemover(nn.Module):
         # Stage 1 — one [CLS] embedding per segment
         cls_embs = self._encode_segments(input_ids, attention_mask, seg_batch)  # (N, d)
 
-        # Stage 2 — pack into (B, max_L, d), apply inter-segment transformer
-        B      = len(doc_lengths)
-        max_L  = max(doc_lengths)
-        d      = cls_embs.size(-1)
+        if self.no_doc_context:
+            # Ablation: skip the inter-segment Transformer entirely.
+            # Each segment is scored from its local RoBERTa [CLS] alone.
+            segs_ctx = self.drop(cls_embs)
+        else:
+            # Stage 2 — pack into (B, max_L, d), apply inter-segment transformer
+            B      = len(doc_lengths)
+            max_L  = max(doc_lengths)
+            d      = cls_embs.size(-1)
 
-        padded   = cls_embs.new_zeros(B, max_L, d)
-        key_mask = torch.ones(B, max_L, dtype=torch.bool, device=cls_embs.device)
+            padded   = cls_embs.new_zeros(B, max_L, d)
+            key_mask = torch.ones(B, max_L, dtype=torch.bool, device=cls_embs.device)
 
-        offset = 0
-        for i, L in enumerate(doc_lengths):
-            padded[i, :L]   = cls_embs[offset:offset + L]
-            key_mask[i, :L] = False   # False = real token, True = padding
-            offset += L
+            offset = 0
+            for i, L in enumerate(doc_lengths):
+                padded[i, :L]   = cls_embs[offset:offset + L]
+                key_mask[i, :L] = False   # False = real token, True = padding
+                offset += L
 
-        pos    = torch.arange(max_L, device=cls_embs.device).unsqueeze(0)
-        padded = self.drop(padded + self.pos_emb(pos))
-        inter  = self.inter_tf(padded, src_key_padding_mask=key_mask)  # (B, max_L, d)
+            pos    = torch.arange(max_L, device=cls_embs.device).unsqueeze(0)
+            padded = self.drop(padded + self.pos_emb(pos))
+            inter  = self.inter_tf(padded, src_key_padding_mask=key_mask)  # (B, max_L, d)
 
-        # Unpack back to (total_segs, d)
-        segs_ctx = torch.cat([inter[i, :L] for i, L in enumerate(doc_lengths)], dim=0)
-        segs_ctx = self.drop(segs_ctx)
+            # Unpack back to (total_segs, d)
+            segs_ctx = torch.cat([inter[i, :L] for i, L in enumerate(doc_lengths)], dim=0)
+            segs_ctx = self.drop(segs_ctx)
 
         # Explainer heads run first; ranker head is conditioned on their outputs
         logit_b = self.head_b(segs_ctx)                              # (N, 6)
@@ -385,7 +398,7 @@ def main():
     parser = argparse.ArgumentParser(description="Train segremover 3-head model")
     parser.add_argument("--encoder",      default="roberta-base",
                         help="HuggingFace encoder (roberta-base or roberta-large)")
-    parser.add_argument("--epochs",       type=int,   default=5)
+    parser.add_argument("--epochs",       type=int,   default=3)
     parser.add_argument("--batch-size",   type=int,   default=2,   dest="batch_size",
                         help="Documents per gradient step")
     parser.add_argument("--seg-batch",    type=int,   default=32,  dest="seg_batch",
@@ -404,13 +417,23 @@ def main():
                         help="Function head loss weight")
     parser.add_argument("--w-c",          type=float, default=1.0,
                         help="Disfluency head loss weight")
-    parser.add_argument("--dev-frac",     type=float, default=0.2, dest="dev_frac")
+    parser.add_argument("--dev-frac",      type=float, default=0.1, dest="dev_frac")
+    parser.add_argument("--test-frac",     type=float, default=0.1, dest="test_frac")
     parser.add_argument("--dropout",      type=float, default=0.1)
     parser.add_argument("--seed",         type=int,   default=42)
     parser.add_argument("--grad-accum",   type=int,   default=8,   dest="grad_accum",
                         help="Gradient accumulation steps (effective batch = batch_size × grad_accum)")
     parser.add_argument("--max-docs",     type=int,   default=None, dest="max_docs",
                         help="Limit to N documents (smoke test)")
+    parser.add_argument("--no-doc-context", action="store_true", dest="no_doc_context",
+                        help="ABLATION: skip the inter-segment Transformer; "
+                             "score each segment from its local RoBERTa [CLS] alone")
+    parser.add_argument("--output-suffix", type=str, default="", dest="output_suffix",
+                        help="Suffix added to checkpoint filename for ablation runs "
+                             "(e.g. 'no_doc' -> models/best_no_doc.pt)")
+    parser.add_argument("--save-splits-only", action="store_true", dest="save_splits_only",
+                        help="Write models/test_ids.json and exit without training. "
+                             "Use this to regenerate the split file after an existing training run.")
     args = parser.parse_args()
 
     torch.manual_seed(args.seed)
@@ -425,8 +448,20 @@ def main():
     # ── Data ──────────────────────────────────────────────────────────────────
     print("Loading data...")
     docs = load_docs(args.max_docs)
-    train_docs, dev_docs = train_dev_split(docs, args.dev_frac)
-    print(f"  train={len(train_docs)} docs  dev={len(dev_docs)} docs")
+    train_docs, dev_docs, test_docs = train_dev_test_split(
+        docs, dev_frac=args.dev_frac, test_frac=args.test_frac
+    )
+    print(f"  train={len(train_docs)} docs  dev={len(dev_docs)} docs  test={len(test_docs)} docs")
+
+    # Save test split so eval.py can filter to exactly these videos.
+    split_path = models_dir / "test_ids.json"
+    import json as _json
+    split_path.write_text(_json.dumps([d["video_id"] for d in test_docs]))
+    print(f"  Test video IDs saved → {split_path}")
+
+    if args.save_splits_only:
+        print("--save-splits-only: done. Exiting without training.")
+        return
 
     tokenizer = AutoTokenizer.from_pretrained(args.encoder)
     train_ds  = DocDataset(train_docs, tokenizer, args.max_tok, args.max_segs)
@@ -452,7 +487,8 @@ def main():
     # ── Model ─────────────────────────────────────────────────────────────────
     print(f"Loading encoder ({args.encoder}) ...")
     model = SegRemover(args.encoder, args.inter_layers, args.dropout,
-                       grad_checkpoint=args.grad_checkpoint).to(device)
+                       grad_checkpoint=args.grad_checkpoint,
+                       no_doc_context=args.no_doc_context).to(device)
     n_params = sum(p.numel() for p in model.parameters()) / 1e6
     print(f"  {n_params:.0f}M parameters")
 
@@ -470,7 +506,8 @@ def main():
     print(f"Warmup: {warmup} steps  |  Loss weights: A=1.0  B={args.w_b}  C={args.w_c}\n")
 
     best_auc  = 0.0
-    best_path = models_dir / "best.pt"
+    suffix    = f"_{args.output_suffix}" if args.output_suffix else ""
+    best_path = models_dir / f"best{suffix}.pt"
 
     # ── Training loop ─────────────────────────────────────────────────────────
     for epoch in range(1, args.epochs + 1):
@@ -553,18 +590,20 @@ def main():
 
     # ── Save config ───────────────────────────────────────────────────────────
     config = {
-        "encoder":      args.encoder,
-        "inter_layers": args.inter_layers,
-        "dropout":      args.dropout,
-        "max_segs":     args.max_segs,
-        "max_tok":      args.max_tok,
-        "seg_batch":    args.seg_batch,
-        "temperature":  T,
-        "best_dev_auc": round(best_auc, 4),
-        "dev_ece":      round(ece_val, 4),
+        "encoder":        args.encoder,
+        "inter_layers":   args.inter_layers,
+        "dropout":        args.dropout,
+        "max_segs":       args.max_segs,
+        "max_tok":        args.max_tok,
+        "seg_batch":      args.seg_batch,
+        "temperature":    T,
+        "best_dev_auc":   round(best_auc, 4),
+        "dev_ece":        round(ece_val, 4),
+        "no_doc_context": args.no_doc_context,
     }
-    (models_dir / "config.json").write_text(json.dumps(config, indent=2))
-    print(f"\nSaved {best_path} and {models_dir / 'config.json'}")
+    config_path = models_dir / f"config{suffix}.json"
+    config_path.write_text(json.dumps(config, indent=2))
+    print(f"\nSaved {best_path} and {config_path}")
     print(f"Best dev AUC: {best_auc:.4f}  |  Temperature: {T:.2f}  |  ECE: {ece_val:.4f}")
 
 
