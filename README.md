@@ -2,7 +2,6 @@
 
 Weakly-supervised, document-aware segment ranker for YouTube transcripts. A three-head hierarchical Transformer (RoBERTa-base + inter-segment Transformer) outputs a calibrated removal probability `p_remove ∈ [0,1]` per topic segment — no manual training labels required.
 
-**Paper:** [SegRemover (ACL 2025)](https://github.com/utkubah/segremover)  
 **Key results:** ROC-AUC 0.871 (95% CI 0.868–0.874), ECE 0.057, gold accuracy 0.773 vs weak-label baseline 0.750 (n = 1,989 segments).
 
 ---
@@ -78,23 +77,6 @@ Outputs go to `results/`.
 
 ---
 
-## HPC (Bocconi SLURM — `stud` partition)
-
-```bash
-sbatch hpc/run_scrape.sh
-sbatch hpc/run_labels.sh
-sbatch hpc/run_train.sh
-sbatch hpc/run_eval.sh          # full paper eval, ~16h, 48 GB RAM, 1 GPU
-```
-
-Pull results locally:
-
-```bash
-scp -r username@hpc.host:/path/to/project/results/ ./results/
-```
-
----
-
 ## Repository structure
 
 ```
@@ -139,7 +121,7 @@ RoBERTa-base encodes each segment independently (Stage 1). A 4-layer inter-segme
 - **Head B** — function class (6-class: new\_information, clarification, useful\_repetition, redundant\_repetition, discourse\_filler, off\_topic)
 - **Head C** — disfluency (5-class: clean, filled\_pause, repetition, revision, restart)
 
-Head A receives `[h ‖ logit_B ‖ logit_C]` (cascade input). Loss: `BCE_A + 0.5·CE_B + 0.5·CE_C`. Temperature scaling (T = 1.1) applied on dev set.
+Head A receives `[h ‖ logit_B ‖ logit_C]` (cascade input). Loss: `BCE_A + CE_B + CE_C`. Temperature scaling (T = 1.1) applied on dev set.
 
 ---
 
